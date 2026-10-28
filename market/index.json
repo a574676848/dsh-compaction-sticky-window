@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "title": "Sticky window plugins",
+  "plugins": [
+    {
+      "name": "dsh-compaction-sticky-window",
+      "title": {
+        "en": "Sticky-window context",
+        "zh": "便签滑动窗口上下文"
+      },
+      "description": {
+        "en": "Replaces the summarizing context compactor with a carried sticky note plus a verbatim sliding window, so a rollover costs no model call.",
+        "zh": "用随身便签加滑动窗口取代摘要式上下文压缩：换窗不发起模型调用，旧窗口由一张确定性便签承接。"
+      },
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByb2xlPSJpbWciIGFyaWEtbGFiZWw9IlN0aWNreSBub3RlIHNsaWRpbmcgb3ZlciBhIHdpbmRvdyI+CiAgPHJlY3QgeD0iMSIgeT0iMSIgd2lkdGg9IjYyIiBoZWlnaHQ9IjYyIiByeD0iMTQiIGZpbGw9IiMxRjNBNUYiLz4KICA8cmVjdCB4PSIzNCIgeT0iMTQiIHdpZHRoPSIxOCIgaGVpZ2h0PSIzNiIgcng9IjMiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzdGQjNFOCIgc3Ryb2tlLXdpZHRoPSIyLjUiLz4KICA8cGF0aCBkPSJNMzQgMjJoMThNMzQgNDJoMTgiIHN0cm9rZT0iIzdGQjNFOCIgc3Ryb2tlLXdpZHRoPSIyLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxyZWN0IHg9IjM4IiB5PSIyNiIgd2lkdGg9IjEwIiBoZWlnaHQ9IjEyIiByeD0iMiIgZmlsbD0iIzdGQjNFOCIgb3BhY2l0eT0iMC41NSIvPgogIDxwYXRoIGQ9Ik0xMSAxNWgyMGw0IDR2MjNhMiAyIDAgMCAxLTIgMkgxMWEyIDIgMCAwIDEtMi0yVjE3YTIgMiAwIDAgMSAyLTJ6IiBmaWxsPSIjRjVDNTQyIi8+CiAgPHBhdGggZD0iTTMxIDE1djRoNHoiIGZpbGw9IiNDOTlBMUUiLz4KICA8cGF0aCBkPSJNMTQgMjVoMTRNMTQgMzFoMTRNMTQgMzdoOCIgc3Ryb2tlPSIjNEEzQTA1IiBzdHJva2Utd2lkdGg9IjIuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgPHBhdGggZD0iTTMwIDQ1bDQgNi00IDYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Y1QzU0MiIgc3Ryb2tlLXdpZHRoPSIyLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L3N2Zz4K",
+      "metadata": {
+        "keywords": [
+          "dsh",
+          "dsh-plugin",
+          "compaction",
+          "context",
+          "sliding-window",
+          "sticky-note"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0",
+          "publishTimestamp": 1793152799,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/a574676848/dsh-compaction-sticky-window",
+            "commit": "e0795ec9934371487a2ec43560504c8c334f5525"
+          },
+          "engines": {
+            "dsh": ">=0.2.0-rc.2 <0.3.0"
+          }
+        },
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1793151928,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/a574676848/dsh-compaction-sticky-window",
+            "commit": "b475e82ef7dd8a1ed614dd840978ae9998788f19"
+          },
+          "engines": {
+            "dsh": ">=0.2.0-rc.2 <0.3.0"
+          }
+        }
+      ]
+    }
+  ]
+}
