@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-sticky-window",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Replaces the summarizing context compactor with a handoff note the model writes itself and a fresh window that keeps only the system prompt, the note, and the current turn.",
   "type": "module",
   "main": "index.js",
@@ -48,3 +48,4 @@
     }
   }
 }
+
