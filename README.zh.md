@@ -14,20 +14,20 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-compaction-sticky-windo
 
 也可以在插件页面安装并启用。bundle 补丁会在 profile 暴露的每一个平面上停用摘要后端，不需要再改其它组合。
 
-## 挂载在哪，为什么是两个平面
+## 安装新增什么，绝不替换什么
 
-压缩有两个可能的归属，profile 属于哪一种，决定了"装上"意味着什么。
+安装只做加法：在 host 平面新增一个压缩后端、新增一个可选 preset、新增四个工具。它不拿走任何工具，也不改变你的会话当前使用的 preset。
 
 | Profile 类型 | 压缩归属 | bundle 的动作 |
 |---|---|---|
-| CLI、headless、SDK | base bundle 的 host 行 | 停用 `compaction-basic`，在原位置插入本后端 |
-| Web、Desktop | 每个 agent preset 内、隔离 `compaction` 的组 | 自带一个把压缩组指向本后端的 preset，并把它设为新会话的默认 |
+| CLI、headless、SDK | base bundle 的 host 行 | 停用 `compaction-basic`，在原位置插入本后端；四个工具为新增 |
+| Web、Desktop | 每个 agent preset 内、隔离 `compaction` 的组 | 多提供一个 preset：除压缩组外与 shipped `standard` 完全相同；你想用时自行选择 |
 
-在有 preset 的 profile 上，host 行够不到会话：preset 隔离了 `compaction`，它自己的后端服务自己的 agent。只装 host 行会让摘要后端继续掌权。所以 bundle 带上了 `presets/sticky-window.patch.yml`——一份把其中一个组换掉的 shipped `standard` preset——并覆盖 preset registry 的默认值来选中它。
+在有 preset 的 profile 上，host 行够不到会话：preset 隔离了 `compaction`，它自己的后端服务自己的 agent。所以 bundle 带上了 `presets/sticky-window.patch.yml`——一份把其中一个组换掉的 shipped `standard` preset。
 
-你在设置里自己的选择仍然优先于这个默认值。切回其它 preset，那个 preset 的后端就会重新接管。
+**本 bundle 绝不触碰 `agent-preset-registry`。** 在运行中的会话下面切换所选 preset，会把该会话正在用的那套工具拆掉、要等下一个新会话才重建；强行改默认 preset 等于对每个打开中的会话都做一次这件事。选择权留给你：**设置 → Agent preset → Sticky window**。在你选之前，shipped preset 继续跑 shipped 后端，现有工具一个不动。
 
-preset 的子列表是一份快照。DSH 升级后运行 `npm run sync-preset`，从本地安装重新生成。
+自带 preset 的子列表 = shipped `standard` 的列表换掉压缩组，且 `npm run sync-preset` 在写快照前会校验插件 id 集合与它读取的安装完全一致。DSH 升级后请重新运行。
 
 ## 窗口生命周期
 
@@ -232,7 +232,7 @@ node scripts/sync-preset.mjs
 - 便签的交接是从整个会话读取的，所以在触发换窗的那个 turn 里写的便签同样会被带走。
 - 单条不可分割、本身就撑满窗口的消息，无法靠换窗修复；可选的 tool-result pruner 仍会在选择区间前运行。
 - 自带的 preset 是目标 DSH 版本上 `standard` 的一份快照。DSH 升级可能改动那个 preset 而本包不会察觉；跑 `sync-preset` 并发布新版本。
-- 把会话切回挂载摘要后端的 preset，会为该会话重新启用它。卸载 bundle 则各处都恢复自带行为。
+- 选择自带 preset 只对**新**会话生效。已经在运行的会话保持它启动时的 preset——这正是本 bundle 不替你切换的原因，也意味着在你选择之前就已开始的会话会继续使用自带后端，直到你新开一个。
+- 在带 preset 的 profile 上，安装本 bundle 在选中它的 preset 之前不会改变任何压缩行为：host 平面的替换够不到会话，因为 preset 隔离了 `compaction`。
 - 预算提醒以普通 `user/message` 事件、`sticky-window-notice` 源类型追加。会话格式允许扩展源类型，因此卸载插件后日志仍可读，但旧版读取器不认识这个名字。
 - 在某个 DSH 版本上，如果自带后端在**模型切换**时绕过 `compactIfNeeded` 触发压缩，那次切换仍可能在没通过便签门禁的情况下换窗。目标 0.2.0 线没有这条路径；更晚的线需要本后端一并拦下。
-- 在没有 agent-preset registry 的 profile（仅 base 或 headless 组合）上，本 bundle 对 `agent-preset-registry` 的覆盖匹配不到任何行，加载器会在启动时打印一行 `entry "agent-preset-registry" not found`。这是预期行为——host 平面的替换照常生效，而同一条 patch 在存在该行的 Web 与 Desktop 上才会选中预设。

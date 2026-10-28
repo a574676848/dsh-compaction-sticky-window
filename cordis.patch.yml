@@ -8,12 +8,12 @@
 #    in its place means the summarizing one never runs.
 # 2. Preset plane (Web and Desktop profiles): the host rows are already disabled
 #    and each agent preset isolates its own `compaction`, so a row here cannot
-#    reach a session. `presets/sticky-window.patch.yml` carries that plane, and
-#    the registry default below selects it for new sessions.
+#    reach a session. `presets/sticky-window.patch.yml` declares that plane as a
+#    preset the person can select; this bundle never changes which preset is
+#    selected.
 #
 # Leaving the host row in place on a preset profile is harmless: it provides a
-# service no isolated agent resolves. Removing `compaction-basic` on both planes
-# is what makes "the old mechanism never triggers" true rather than likely.
+# service no isolated agent resolves.
 - id: compaction-basic
   name: '@deepseek-ai/dsh-compaction-basic'
   disabled: true
@@ -31,13 +31,3 @@
         retainTokens: 0
         # The note is replaced wholesale on every rollover.
         noteMaxBytes: 6144
-
-# Select this bundle's preset for new sessions on a preset-backed profile.
-# A user's own choice in Settings wins over this default, so the setting stays
-# the person's to make; the override only decides what a fresh profile starts
-# with. The row is absent on host-plane profiles, where this patch is skipped
-# with a warning.
-- id: agent-preset-registry
-  name: '@deepseek-ai/dsh-agent-preset-registry'
-  config:
-    default: sticky-window

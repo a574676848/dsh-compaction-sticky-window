@@ -593,6 +593,16 @@ test('the preset row leaves automation and notices to the host engine', async ()
   assert.doesNotMatch(text, /compaction-basic/u, 'the preset mounts no summarizing backend')
 })
 
+test('installing never changes which preset is selected', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const host = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+
+  // Forcing a default preset tears the tools out of every open session; the
+  // bundle ships a preset but never selects it.
+  assert.doesNotMatch(host, /agent-preset-registry/u)
+  assert.match(host, /disabled: true/u, 'the host row still retires the summarizing backend')
+})
+
 test('a negative budget answer is retried instead of pinned for the session', async () => {
   const ctx = new Context()
   /** @type {object[]} */

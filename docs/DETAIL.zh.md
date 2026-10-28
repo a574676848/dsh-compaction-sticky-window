@@ -30,9 +30,11 @@ DeepSeek Harness 默认用摘要回收上下文：会话超过压力阈值后，
 
 一段常驻系统提示向模型说明整个闭环怎么用，以及绝不能把它暴露给你。
 
-## Web 或 Desktop 上选择预设
+## 只做加法，不做替换
 
-在 CLI、headless、SDK profile 上，装上即接管。Web 与 Desktop 上，压缩后端属于 Agent 预设而不是 profile，因此插件自带一个预设并把新会话的默认值指向它。你在设置里自己选过的预设始终优先；选回其它预设，那个预设的后端就会重新接管。
+安装本插件只新增：一个压缩后端、一个可选的 Agent 预设、四个工具。它不拿走任何工具，也不改变你的会话当前使用的预设。
+
+在 CLI、headless、SDK profile 上，装上即由本后端接管。Web 与 Desktop 上，压缩后端属于 Agent 预设而不是 profile，因此插件多提供一个预设——除压缩组外与 shipped `standard` 完全相同——选择权留给你：**设置 → Agent preset → Sticky window**。在你选中之前，压缩行为不会有任何改变，现有工具一个也不会移动。
 
 ## 你会看到什么
 

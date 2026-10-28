@@ -16,20 +16,20 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-compaction-sticky-windo
 
 Or through the Plugins page, which installs the bundle and enables it. The bundle patch retires the summarizing backend on every plane the profile exposes, so nothing else needs composing.
 
-## Where it mounts, and why that is two places
+## What installing adds, and what it never replaces
 
-Compaction has two possible owners, and which one a profile uses decides what "installed" has to mean.
+Installing adds. It adds one compaction backend on the host plane, one optional agent preset, and four tools. It does not take a tool away, and it does not change which preset your sessions use.
 
 | Profile kind | Compaction owner | What the bundle does |
 |---|---|---|
-| CLI, headless, SDK | A host-plane row from the base bundle | Disables `compaction-basic` and inserts this backend in its place |
-| Web, Desktop | Each agent preset, inside a group that isolates `compaction` | Ships its own preset with the compaction group pointed here, and selects it as the default for new sessions |
+| CLI, headless, SDK | A host-plane row from the base bundle | Disables `compaction-basic` and inserts this backend in its place; the four tools are added |
+| Web, Desktop | Each agent preset, inside a group that isolates `compaction` | Ships one more preset, identical to the shipped `standard` except for its compaction group; you select it if you want it |
 
-On a preset-backed profile a host-plane row cannot reach a session: the preset isolates `compaction`, so its own backend serves its own agents. Running only a host row there would leave the summarizing backend in charge. That is why the bundle ships `presets/sticky-window.patch.yml` — the shipped `standard` preset with one group changed — and overrides the preset registry's default to select it.
+On a preset-backed profile a host-plane row cannot reach a session: the preset isolates `compaction`, so its own backend serves its own agents. That is why the bundle ships `presets/sticky-window.patch.yml` — the shipped `standard` preset with one group changed.
 
-A person's own choice in Settings still wins over that default. If they switch back to another preset, that preset's backend takes over again.
+**This bundle never touches `agent-preset-registry`.** Switching the selected preset under a running session tears down the tools of the preset in use and leaves that session without them until a new one starts; forcing a default would do exactly that to every open session. The choice stays yours: **Settings → Agent preset → Sticky window**. Until then the shipped preset keeps running the shipped backend, and every existing tool stays where it is.
 
-The preset's child list is a snapshot. `npm run sync-preset` regenerates it from a local installation after a DSH upgrade.
+The bundled preset's child list is the shipped `standard` list with the compaction group swapped, and `npm run sync-preset` refuses to write a snapshot whose plugin ids differ from the installation it read. Re-run it after a DSH upgrade.
 
 ## The window lifecycle
 
@@ -234,8 +234,8 @@ node scripts/sync-preset.mjs
 - If the model never writes a note, the window holds out until a provider-confirmed overflow forces it. That is deliberate — an unprepared rollover loses state — but it means a model that ignores every notice reaches the hard failure instead of a quiet one.
 - The note's handoff is read from the whole session, so a note written in the turn that triggers a rollover is still carried.
 - A single indivisible message larger than the window cannot be repaired by a rollover; the optional tool-result pruner still runs before selection.
-- The shipped preset is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version.
-- Switching a session back to a preset that mounts the summarizing backend re-enables it for that session. Removing the bundle restores the shipped behavior everywhere.
+- The bundled preset is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version.
+- Choosing the bundled preset applies to **new** sessions. A session already running keeps the preset it started with — which is the reason this bundle never switches it for you, and also why a session that predates your choice keeps compacting the shipped way until you start another.
+- On a preset-backed profile, installing this bundle changes nothing about compaction until you select its preset. The host-plane replacement cannot reach a session there, because the preset isolates `compaction`.
 - Push notices are appended as ordinary `user/message` events with the `sticky-window-notice` source kind. The session format admits extension source kinds, so a log stays readable after the plugin is removed, but an older reader will not know that kind by name.
 - On a DSH release whose base backend compacts on a **model switch** through a path that bypasses `compactIfNeeded`, that switch can still roll over without the note gate. The targeted 0.2.0 line has no such path; a later line would need this backend to gate it too.
-- On a profile with no agent-preset registry (a base-only or headless composition), the bundle's `agent-preset-registry` override matches no row and the loader prints one `entry "agent-preset-registry" not found` line at startup. That is expected — the host-plane replacement still applies, and the same patch selects the preset on Web and Desktop, where the row exists.

@@ -30,9 +30,11 @@ The note claims its byte budget before anything else and is never truncated into
 
 A standing prompt section tells the model how the whole loop works, and that it must never surface it to you.
 
-## Choosing the preset on Web or Desktop
+## Adding, never replacing
 
-On a CLI, headless, or SDK profile the plugin takes over as soon as it is installed. On Web and Desktop the compaction backend belongs to the agent preset rather than the profile, so the plugin ships its own preset and selects it as the default for new sessions. Your own preset choice in Settings always wins; pick any other preset and its backend takes over again.
+Installing this plugin only adds: one compaction backend, one optional agent preset, and four tools. It does not remove a tool and does not change which preset your sessions use.
+
+On a CLI, headless, or SDK profile the backend takes over as soon as the plugin is installed. On Web and Desktop the compaction backend belongs to the agent preset rather than the profile, so the plugin ships one more preset — identical to the shipped `standard` preset except for its compaction group — and leaves the choice to you: **Settings → Agent preset → Sticky window**. Until you pick it, nothing about compaction changes, and no existing tool moves.
 
 ## What you will see
 

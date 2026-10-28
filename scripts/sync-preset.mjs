@@ -140,6 +140,42 @@ function rewrite(source) {
   return `${HEADER.join('\n')}${out.join('\n')}`
 }
 
+/**
+ * Top-level child ids of one preset patch file.
+ *
+ * Only the children of `config.plugins` sit at ten spaces; a nested group's own
+ * children are deeper, and the preset row's siblings (`- insert:`) are shallower.
+ * @param {string} text - a preset patch file.
+ * @returns {string[]} its top-level plugin ids, in order.
+ */
+function topLevelIds(text) {
+  return [...text.matchAll(/^ {10}- id: (\S+)$/gmu)].map(match => match[1])
+}
+
+/**
+ * Refuse to write a snapshot that is not the shipped preset plus one swapped group.
+ *
+ * A snapshot that quietly drops a plugin takes tools away from every session
+ * that selects it. Comparing the id sets — not the text, which legitimately
+ * differs in the compaction group — is what makes that impossible to ship.
+ * @param {string} source - the shipped preset patch text.
+ * @param {string} generated - the rewritten text.
+ * @throws {Error} when the two disagree on which plugins exist.
+ */
+function assertSameChildren(source, generated) {
+  const shipped = topLevelIds(source)
+  const written = topLevelIds(generated)
+  const missing = shipped.filter(id => !written.includes(id))
+  const added = written.filter(id => !shipped.includes(id))
+  if (missing.length > 0 || added.length > 0) {
+    throw new Error(
+      'refusing to write a preset that differs from the shipped one beyond the compaction group:'
+      + `${missing.length > 0 ? ` missing [${missing.join(', ')}]` : ''}`
+      + `${added.length > 0 ? ` added [${added.join(', ')}]` : ''}`,
+    )
+  }
+}
+
 const argv = process.argv.slice(2)
 const from = option(argv, '--from') ?? defaultSource()
 const out = option(argv, '--out')
@@ -147,6 +183,7 @@ const out = option(argv, '--out')
 
 const source = fs.readFileSync(from, 'utf8')
 const generated = rewrite(source)
+assertSameChildren(source, generated)
 fs.mkdirSync(path.dirname(out), { recursive: true })
 fs.writeFileSync(out, `${generated.trimEnd()}\n`, 'utf8')
-process.stdout.write(`wrote ${out} from ${from}\n`)
+process.stdout.write(`wrote ${out} from ${from} (${topLevelIds(generated).length} plugins, id set unchanged)\n`)
