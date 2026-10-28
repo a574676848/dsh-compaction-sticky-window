@@ -1,0 +1,21 @@
+# Sticky-window compaction replaces the shipped summarizing backend.
+#
+# `compaction-basic` writes its replacement message with an auxiliary model
+# call. This bundle turns that row off and mounts the sticky-window backend in
+# its place, so the single `ctx.compaction` service this composition provides is
+# the sliding-window one. `command-compact` and every automatic trigger keep
+# working because they address the service, not the backend.
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  disabled: true
+
+- insert:
+    - id: compaction-sticky-window
+      name: 'dsh-compaction-sticky-window'
+      config:
+        # Pressure at 80% of the message budget; the recent 35% of that budget
+        # stays verbatim as the sliding window.
+        thresholdRatio: 0.8
+        retainRatio: 0.35
+        # The carried note is replaced wholesale on every rollover.
+        noteMaxBytes: 6144

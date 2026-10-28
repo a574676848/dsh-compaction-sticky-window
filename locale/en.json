@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Sticky-window context",
+    "description": "Replaces the summarizing context compactor with a carried sticky note plus a verbatim sliding window, so a rollover costs no model call.",
+    "detail": "docs/DETAIL.md"
+  }
+}

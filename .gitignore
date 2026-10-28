@@ -1,0 +1,5 @@
+node_modules/
+probe.mjs
+*.log
+.DS_Store
+market-cache/
