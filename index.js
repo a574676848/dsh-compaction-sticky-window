@@ -822,6 +822,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     const budget = await this.#budgetFor(session, new AbortController().signal)
     if (budget === undefined) return undefined
     const used = this.ctx.tokenMeter.measure(session).totalTokens
+    // Away from the line there is nothing to say, and the window state below
+    // costs a log scan. This runs on every step, so it exits cheap.
+    if (used < budget.thresholdTokens - this.policy.warnTokens) return undefined
     const ceiling = rolloverCeiling(budget, this.policy.fallbackTokens, budget.contextWindow, budget.reserved)
     const window = currentWindowNumber(session)
     const previous = this.#notices.get(session)
