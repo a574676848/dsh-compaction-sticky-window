@@ -56,6 +56,15 @@ const DEFAULT_FALLBACK_TOKENS = 16384
  * size turns a hard failure into a plain "not yet".
  */
 const DEFAULT_MIN_EVICT_TOKENS = 1024
+/**
+ * Default time before a failed or negative budget resolution is retried.
+ *
+ * A resolved budget is cached for the session because resolving it is a
+ * provider round trip. A *negative* answer is different: an operator can add a
+ * missing `contextWindow` or lower the headroom while the session runs, and the
+ * plugin must notice. This interval bounds how long a stale "no budget" lasts.
+ */
+const DEFAULT_BUDGET_RECHECK_MS = 60_000
 /** Default characters returned by one history read. */
 const DEFAULT_HISTORY_READ_MAX_CHARS = 4000
 /** Default hits returned by one history search. */
@@ -85,6 +94,7 @@ export const EXTRA_KEYS = [
   'warnTokens',
   'fallbackTokens',
   'minEvictTokens',
+  'budgetRecheckMs',
   'notices',
   'historyReadMaxChars',
   'historySearchLimit',
@@ -151,6 +161,7 @@ export function resolveConfig(config) {
     warnTokens: positiveInteger('warnTokens', config.warnTokens, DEFAULT_WARN_TOKENS),
     fallbackTokens: positiveInteger('fallbackTokens', config.fallbackTokens, DEFAULT_FALLBACK_TOKENS),
     minEvictTokens: positiveInteger('minEvictTokens', config.minEvictTokens, DEFAULT_MIN_EVICT_TOKENS),
+    budgetRecheckMs: positiveInteger('budgetRecheckMs', config.budgetRecheckMs, DEFAULT_BUDGET_RECHECK_MS),
     historyReadMaxChars: positiveInteger('historyReadMaxChars', config.historyReadMaxChars, DEFAULT_HISTORY_READ_MAX_CHARS),
     historySearchLimit: positiveInteger('historySearchLimit', config.historySearchLimit, DEFAULT_HISTORY_SEARCH_LIMIT),
     historySnippetChars: positiveInteger('historySnippetChars', config.historySnippetChars, DEFAULT_HISTORY_SNIPPET_CHARS),

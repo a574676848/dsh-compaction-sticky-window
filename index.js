@@ -613,6 +613,7 @@ const CONFIG_SCHEMA = z.object({
   warnTokens: COUNT(),
   fallbackTokens: COUNT(),
   minEvictTokens: COUNT(),
+  budgetRecheckMs: COUNT(),
   notices: z.boolean(),
   historyReadMaxChars: COUNT(),
   historySearchLimit: COUNT(),
@@ -645,6 +646,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
 
   /** Per-session resolved budget, keyed by the route it was resolved for. */
   #budgets = new WeakMap()
+
+  /** Incremental window/gate state per session, advanced by `eventAt`. */
+  #windowStates = new WeakMap()
 
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx - plugin context.
@@ -703,7 +707,7 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     if (budget === undefined) return null
     const used = this.ctx.tokenMeter.measure(agent.session).totalTokens
     if (used < budget.thresholdTokens) return null
-    if (!noteSavedThisWindow(agent.session).saved) return null
+    if (!this.#windowState(agent.session).saved) return null
     return this.rolloverNow(agent, signal)
   }
 
@@ -722,12 +726,20 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     const { provider, model, maxTokens } = header.config
     if (provider.length === 0 || model.length === 0) return undefined
     const key = `${provider}/${model}/${maxTokens ?? ''}`
+    const now = Date.now()
     const cached = this.#budgets.get(session)
-    if (cached !== undefined && cached.key === key) return cached.value
+    if (cached !== undefined && cached.key === key) {
+      if (cached.value !== undefined) return cached.value
+      // A negative answer is re-asked after `budgetRecheckMs`, because an
+      // operator can fix the adapter's capacity while the session runs.
+      if (now < cached.retryAt) return undefined
+    }
     const resolved = await this.#resolveBudget(provider, model, maxTokens, signal)
-    // A lookup that failed (network, aborted) is retried next step; only a
-    // resolved answer, including a definitive "no capacity", is cached.
-    if (resolved.cacheable) this.#budgets.set(session, { key, value: resolved.value })
+    if (resolved.value !== undefined) {
+      this.#budgets.set(session, { key, value: resolved.value })
+    } else {
+      this.#budgets.set(session, { key, retryAt: Date.now() + this.policy.budgetRecheckMs })
+    }
     return resolved.value
   }
 
@@ -737,7 +749,7 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
    * @param {string} model - routed model.
    * @param {number | undefined} maxTokens - the request's own output cap, when set.
    * @param {AbortSignal} signal - cancellation for the lookup.
-   * @returns {Promise<{ cacheable: boolean, value: object | undefined }>} the budget and whether it may be cached.
+   * @returns {Promise<{ value: object | undefined }>} the budget, when one exists.
    */
   async #resolveBudget(provider, model, maxTokens, signal) {
     let info
@@ -745,16 +757,60 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       info = await this.ctx.llm.resolveModelInfo(provider, model, signal)
     } catch (error) {
       signal.throwIfAborted()
-      return { cacheable: false, value: undefined }
+      return { value: undefined }
     }
     const contextWindow = info.context?.contextWindow
     if (typeof contextWindow !== 'number' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
-      return { cacheable: true, value: undefined }
+      return { value: undefined }
     }
     const reserved = maxTokens ?? info.defaultMaxTokens ?? 0
     const budget = resolveRolloverBudget(this.config, { provider, model }, contextWindow, reserved)
-    if (budget.problem !== undefined) return { cacheable: true, value: undefined }
-    return { cacheable: true, value: { ...budget, contextWindow, reserved } }
+    if (budget.problem !== undefined) return { value: undefined }
+    return { value: { ...budget, contextWindow, reserved } }
+  }
+
+  /**
+   * Current window ordinal and write-ahead gate state, advanced incrementally.
+   *
+   * `#noticeFor` runs on every pre-step, so this must cost only the events added
+   * since the last call. A summary is counted only once a replacement cites it,
+   * which is what keeps a crash between the two appends from opening a window
+   * that never ended.
+   * @param {object} session - the session to inspect.
+   * @returns {{ window: number, saved: boolean }} the current ordinal and whether this window has a saved note.
+   */
+  #windowState(session) {
+    const state = this.#windowStates.get(session)
+      ?? { at: 0, window: 0, pending: new Set(), savedInWindow: -1, calls: new Map() }
+    for (let seq = state.at; seq < session.seq; seq += 1) {
+      const event = session.eventAt(seq)
+      if (event === undefined) continue
+      switch (event.type) {
+        case 'tool/call':
+          state.calls.set(event.data.callId, event.data.name)
+          break
+        case 'compaction/summary':
+          state.pending.add(event.seq)
+          break
+        case 'user/message':
+          for (const cited of event.sourceEventSeqs ?? []) {
+            if (state.pending.delete(cited)) state.window += 1
+          }
+          break
+        case 'tool/result': {
+          if (state.calls.get(event.data.message?.source?.callId) !== PIN_TOOL_NAME) break
+          if (event.data.error !== undefined || event.data.message?.isError === true) break
+          if (extractPins(textOf(event.data.message)) === null) break
+          state.savedInWindow = state.window
+          break
+        }
+        default:
+          break
+      }
+    }
+    state.at = session.seq
+    this.#windowStates.set(session, state)
+    return { window: state.window + 1, saved: state.savedInWindow === state.window }
   }
 
   /**
@@ -794,10 +850,10 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     if (!this.policy.notices) return
     this.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       const pending = await this.#noticeFor(agent)
-      const before = currentWindowNumber(agent.session)
+      const before = this.#windowState(agent.session).window
       const decision = await next()
       if (decision.kind === 'reject' || signal.aborted) return decision
-      if (pending === undefined || currentWindowNumber(agent.session) !== before) return decision
+      if (pending === undefined || this.#windowState(agent.session).window !== before) return decision
       // Record only now: a rejected step must not consume the one notice this
       // window gets for its stage.
       pending.state.sent.add(pending.stage)
@@ -826,7 +882,7 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     // costs a log scan. This runs on every step, so it exits cheap.
     if (used < budget.thresholdTokens - this.policy.warnTokens) return undefined
     const ceiling = rolloverCeiling(budget, this.policy.fallbackTokens, budget.contextWindow, budget.reserved)
-    const window = currentWindowNumber(session)
+    const { window, saved } = this.#windowState(session)
     const previous = this.#notices.get(session)
     const state = previous !== undefined && previous.window === window
       ? previous
@@ -842,7 +898,7 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     if (used >= ceiling) {
       // Once the note is saved the rollover happens in `compactIfNeeded`; the
       // notice is only for a window that cannot end yet.
-      return noteSavedThisWindow(session).saved ? undefined : once('blocked', blockedNotice)
+      return saved ? undefined : once('blocked', blockedNotice)
     }
     if (used >= budget.thresholdTokens) {
       return once('exhausted', () => exhaustedNotice(ceiling - used))

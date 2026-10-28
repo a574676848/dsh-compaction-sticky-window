@@ -593,4 +593,47 @@ test('the preset row leaves automation and notices to the host engine', async ()
   assert.doesNotMatch(text, /compaction-basic/u, 'the preset mounts no summarizing backend')
 })
 
+test('a negative budget answer is retried instead of pinned for the session', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  // The adapter declares no capacity until the operator fixes it mid-session.
+  let contextWindow
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({
+      ...contextWindow === undefined ? { context: {} } : { context: { contextWindow } },
+      defaultMaxTokens: 0,
+    }),
+  })
+  const engine = new StickyWindowCompactionEngine(ctx, {
+    auto: false,
+    headroomTokens: 0,
+    maxTokens: 1,
+    budgetRecheckMs: 20,
+    minEvictTokens: 100,
+  })
+  const session = buildSession(4)
+  appendPin(session, 1, ['ready'])
+  openSecondTurn(session)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+  const agent = { session, options: {} }
+  const signal = new AbortController().signal
+
+  assert.equal(await engine.compactIfNeeded(agent, 'pressure', signal), null, 'no capacity yet')
+
+  contextWindow = 200
+  assert.equal(await engine.compactIfNeeded(agent, 'pressure', signal), null, 'the negative answer is cached')
+
+  await new Promise(resolve => setTimeout(resolve, 40))
+  const recovered = await engine.compactIfNeeded(agent, 'pressure', signal)
+  assert.ok(recovered !== null, 'the budget is resolved again after the interval')
+})
+
+
+
 

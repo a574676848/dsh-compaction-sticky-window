@@ -197,6 +197,7 @@ Every key is optional. Unknown keys fail at load instead of being ignored.
 | `warnTokens` | `6144` | Distance before the rollover line at which the session pushes its first notice. |
 | `fallbackTokens` | `16384` | Slack past the line during which a rollover waits for the note. |
 | `minEvictTokens` | `1024` | Smallest span worth replacing; below it a rollover is refused, because the note's fixed framing would be larger than what it replaces. |
+| `budgetRecheckMs` | `60000` | How long a failed or negative budget resolution is trusted before the model's capacity is asked again. |
 | `notices` | `true` | Push budget notices into the model's context. |
 | `historyReadMaxChars` | `4000` | Characters returned by one archive read. |
 | `historySearchLimit` | `5` | Hits returned by one archive search. |

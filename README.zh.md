@@ -194,6 +194,7 @@ bundle 注册了一个 `systemPrompt` 段（order 9000），说明窗口是什�
 | `warnTokens` | `6144` | 距换窗线多少 token 时推送第一条提醒。 |
 | `fallbackTokens` | `16384` | 越过换窗线后为等待便签而保留的余量。 |
 | `minEvictTokens` | `1024` | 值得替换的最小空间；低于它则拒绝换窗，因为便签的固定框架会比被替换的内容还大。 |
+| `budgetRecheckMs` | `60000` | 失败或否定性的预算解析在被重新询问前可信任的时长。 |
 | `notices` | `true` | 是否把预算提醒推进模型上下文。 |
 | `historyReadMaxChars` | `4000` | 单次归档读取返回的字符数。 |
 | `historySearchLimit` | `5` | 单次归档检索返回的命中数。 |
