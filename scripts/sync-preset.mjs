@@ -115,11 +115,13 @@ function rewrite(source) {
         `${child}  thresholdRatio: 0.8`,
         `${child}  retainTokens: 0`,
         `${child}  noteMaxBytes: 6144`,
-        // This row only supplies the compaction service. The tools and the
-        // prompt protocol are registered once, on the host plane, and the
-        // preset realm inherits the `tools` and `systemPrompt` registries
-        // because only `compaction` and `toolResultPruner` are isolated.
-        // Registering them here too would collide on the same tool names.
+        // This row only supplies the isolated `compaction` service. Automation,
+        // notices, the tools, and the prompt protocol all belong to the host
+        // row, because a preset realm inherits the `tools` and `systemPrompt`
+        // registries it does not isolate. Registering any of them here would
+        // double every notice and every pressure check.
+        `${child}  auto: false`,
+        `${child}  notices: false`,
         `${child}  noteTool: false`,
         `${child}  sensingTool: false`,
         `${child}  historyTool: false`,

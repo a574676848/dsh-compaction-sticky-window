@@ -33,10 +33,30 @@ function messageText(message) {
 }
 
 /**
+ * Summaries whose replacement actually landed.
+ *
+ * A crash between the summary record and its replacement leaves an orphan
+ * summary: the window it describes never ended, so counting it would report
+ * live messages as archived and advance the ordinal by one.
+ * @param {readonly object[]} events - the session log.
+ * @returns {Set<number>} seqs of summaries a replacement cites.
+ */
+function committedSummaries(events) {
+  /** @type {Set<number>} */
+  const cited = new Set()
+  for (const event of events) {
+    if (event.type !== 'user/message') continue
+    for (const seq of event.sourceEventSeqs ?? []) cited.add(seq)
+  }
+  return cited
+}
+
+/**
  * Build the archive index for one session.
  *
- * Each `compaction/summary` event opens one window; its `shadowedSeqs` are the
- * items in that window, in the order they appeared on the surface.
+ * Each committed `compaction/summary` event opens one window; its
+ * `shadowedSeqs` are the items in that window, in the order they appeared on
+ * the surface.
  * @param {object} session - the session whose log holds the archive.
  * @returns {{ windows: object[], items: Map<string, object> }} the index.
  */
@@ -45,9 +65,12 @@ export function collectArchive(session) {
   const windows = []
   /** @type {Map<string, object>} */
   const items = new Map()
+  const events = session.snapshotEvents()
+  const committed = committedSummaries(events)
   let ordinal = 0
-  for (const event of session.snapshotEvents()) {
+  for (const event of events) {
     if (event.type !== 'compaction/summary') continue
+    if (!committed.has(event.seq)) continue
     ordinal += 1
     const windowId = `${ordinal}`
     /** @type {object[]} */
@@ -162,9 +185,11 @@ export function readArchivedItem(archive, id, maxChars) {
  * @returns {number} the current window ordinal, starting at 1.
  */
 export function currentWindowNumber(session) {
+  const events = session.snapshotEvents()
+  const committed = committedSummaries(events)
   let rollovers = 0
-  for (const event of session.snapshotEvents()) {
-    if (event.type === 'compaction/summary') rollovers += 1
+  for (const event of events) {
+    if (event.type === 'compaction/summary' && committed.has(event.seq)) rollovers += 1
   }
   return rollovers + 1
 }

@@ -12,6 +12,7 @@
  */
 
 import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+import { PIN_TOOL_NAME, extractPins, textOf } from './note.js'
 
 /**
  * Whether surface node 0 is the system prompt, which a rollover always keeps.
@@ -91,7 +92,9 @@ export function selectRolloverRange(session) {
  *
  * The write-ahead gate the reference implementation enforces: a rollover the
  * model asked for must follow a note, because the note is the only thing the
- * fresh window inherits. Only a successful `sticky_note` update counts.
+ * fresh window inherits. A pin that failed validation never reaches the note,
+ * so it must not satisfy the gate either — only a successful result carrying
+ * pins counts.
  * @param {object} session - the session to inspect.
  * @returns {{ saved: boolean, savedInWindow: number }} whether the current window has a note, and which window holds the last one.
  */
@@ -110,8 +113,9 @@ export function noteSavedThisWindow(session) {
       continue
     }
     if (event.type !== 'tool/result') continue
-    const name = calls.get(event.data.message?.source?.callId)
-    if (name !== 'sticky_note') continue
+    if (calls.get(event.data.message?.source?.callId) !== PIN_TOOL_NAME) continue
+    if (event.data.error !== undefined || event.data.message?.isError === true) continue
+    if (extractPins(textOf(event.data.message)) === null) continue
     savedInWindow = windowOrdinal
   }
   return { saved: savedInWindow === windowOrdinal, savedInWindow }

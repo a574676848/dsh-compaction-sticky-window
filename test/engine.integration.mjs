@@ -507,4 +507,90 @@ test('a rollover is refused when the evictable span is smaller than the note', a
   assert.equal(session.snapshotEvents().filter(event => event.type === 'compaction/summary').length, 0)
 })
 
+test('a rejected pin does not satisfy the rollover gate', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(4)
+  const callId = 'pin-rejected'
+  session.append('assistant/message', {
+    stream: [],
+    turn: 1,
+    step: 4,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: callId, name: 'sticky_note', arguments: '{"action":"update"}' }],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('tool/call', { turn: 1, step: 4, callId, name: 'sticky_note', arguments: '{"action":"update"}' })
+  session.append('tool/result', {
+    turn: 1,
+    step: 4,
+    error: { name: 'Error', code: 'BUDGET' },
+    message: createMessage({
+      role: 'tool',
+      content: [{ type: 'text', text: 'sticky_note: the pinned list exceeds the budget' }],
+      source: { kind: 'tool', callId },
+      toolCallId: callId,
+      isError: true,
+    }),
+  }, { surfaceOp: 'append' })
+  openSecondTurn(session)
+
+  const rollover = registered.find(tool => tool.name === 'new_context')
+  const value = await rollover.execute({}, { agent: { session, options: {} } })
+
+  assert.equal(value.rolled, false, 'a rejected pin must not open a window')
+  assert.match(value.detail, /No note is saved in this window/u)
+})
+
+test('a rejected step does not consume the window notice', async () => {
+  const { ctx, session } = harnessAtThreshold(createMeter(), 500)
+  const payload = {
+    agent: { session, options: {} },
+    messages: [],
+    turn: 1,
+    step: 2,
+    signal: new AbortController().signal,
+    modelSelection: { provider: 'mock', model: 'mock' },
+  }
+
+  const rejected = await ctx.waterfall('agent/pre-step', payload, () => Promise.resolve({ kind: 'reject' }))
+  assert.equal(rejected.kind, 'reject')
+
+  const entered = await ctx.waterfall('agent/pre-step', payload, () => Promise.resolve({ kind: 'enter', messages: [] }))
+  assert.equal(entered.messages.length, 1, 'the stage is still available after a rejected step')
+})
+
+test('an orphan summary is not an archived window', async () => {
+  const session = buildSession(2)
+  session.append('compaction/summary', {
+    compactionId: 'orphan',
+    summary: [{ type: 'text', text: 'never landed' }],
+    shadowedRange: { start: SessionSeq(2), end: SessionSeq(4) },
+    shadowedSeqs: [SessionSeq(2), SessionSeq(4)],
+    shadowedTokenCount: 20,
+    provider: 'dsh-compaction-sticky-window',
+    model: 'deterministic-note',
+  })
+  const { collectArchive, currentWindowNumber } = await import('../src/history.js')
+
+  assert.equal(collectArchive(session).windows.length, 0, 'no phantom window')
+  assert.equal(currentWindowNumber(session), 1, 'the ordinal does not advance')
+})
+
+test('the preset row leaves automation and notices to the host engine', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const text = await readFile(new URL('../presets/sticky-window.patch.yml', import.meta.url), 'utf8')
+
+  assert.match(text, /auto: false/u)
+  assert.match(text, /notices: false/u)
+  assert.match(text, /noteTool: false/u)
+  assert.doesNotMatch(text, /compaction-basic/u, 'the preset mounts no summarizing backend')
+})
+
 

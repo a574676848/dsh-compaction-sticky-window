@@ -125,6 +125,7 @@ Every key is optional. Unknown keys fail at load instead of being ignored.
 | `warningTokens` | `6144` | Remaining budget at which `context_status` advises writing the note now. |
 | `warnTokens` | `6144` | Distance before the rollover line at which the session pushes its first notice. |
 | `fallbackTokens` | `16384` | Slack past the line during which a rollover waits for the note. |
+| `minEvictTokens` | `1024` | Smallest span worth replacing; below it a rollover is refused, because the note's fixed framing would be larger than what it replaces. |
 | `notices` | `true` | Push budget notices into the model's context. |
 | `historyReadMaxChars` | `4000` | Characters returned by one archive read. |
 | `historySearchLimit` | `5` | Hits returned by one archive search. |
@@ -164,3 +165,4 @@ node scripts/sync-preset.mjs
 - The shipped preset is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version.
 - Switching a session back to a preset that mounts the summarizing backend re-enables it for that session. Removing the bundle restores the shipped behavior everywhere.
 - Push notices are appended as ordinary `user/message` events with the `sticky-window-notice` source kind. The session format admits extension source kinds, so a log stays readable after the plugin is removed, but an older reader will not know that kind by name.
+- On a DSH release whose base backend compacts on a **model switch** through a path that bypasses `compactIfNeeded`, that switch can still roll over without the note gate. The targeted 0.2.0 line has no such path; a later line would need this backend to gate it too.

@@ -52,14 +52,19 @@ export function exhaustedNotice(remainingTokens) {
 }
 
 /**
- * The notice shown when the window must end but no note was ever saved.
+ * The notice shown when the window is over its ceiling but cannot end yet.
+ *
+ * Two different situations land here — no note saved, or nothing large enough
+ * to replace — and the model cannot tell them apart, so the notice names both
+ * and gives an action for each.
  * @returns {{ text: string, summary: string }} the notice.
  */
 export function blockedNotice() {
   return {
-    summary: 'write the note first',
-    text: 'This window cannot end yet: no handoff note has been saved, so nothing would survive it. '
-      + 'Call `sticky_note` action `update` with the complete state now — this is the only remaining '
-      + 'action that matters. Do not call other tools first.',
+    summary: 'window cannot end yet',
+    text: 'This window is past its budget but cannot end yet. If the handoff note is not saved, call '
+      + '`sticky_note` action `update` now with the complete state — that is the only thing that '
+      + 'survives. If the note is already saved, the history in this window is still too small to '
+      + 'replace, so finish or split the current work instead of calling `new_context` again.',
   }
 }

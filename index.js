@@ -161,7 +161,7 @@ function currentPins(session) {
   if (pins.length > 0) return pins
   for (const message of session.deriveMessages()) {
     if (message.source?.kind !== 'compact-checkpoint') continue
-    const section = /## Pinned state\n([\s\S]*?)(?:\n## |\n<\/sticky-note>)/u.exec(textOf(message))
+    const section = /## Handoff\n([\s\S]*?)(?:\n## |\n<\/sticky-note>)/u.exec(textOf(message))
     if (section === null) continue
     const lines = section[1]
       .split('\n')
@@ -643,6 +643,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
   /** Per-session budget notices already delivered in the current window. */
   #notices = new WeakMap()
 
+  /** Per-session resolved budget, keyed by the route it was resolved for. */
+  #budgets = new WeakMap()
+
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx - plugin context.
    * @param {Record<string, unknown>} [config] - raw plugin config.
@@ -706,6 +709,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
 
   /**
    * Resolve the routed target's rollover line and capacity.
+   *
+   * Cached per session and route: the caller runs on every step, and resolving
+   * model info is a provider round trip that does not change within a window.
    * @param {object} session - session whose latest request is measured.
    * @param {AbortSignal} signal - cancellation for the model-info lookup.
    * @returns {Promise<object | undefined>} the budget, or undefined when it cannot be resolved.
@@ -715,21 +721,40 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     if (header === undefined) return undefined
     const { provider, model, maxTokens } = header.config
     if (provider.length === 0 || model.length === 0) return undefined
+    const key = `${provider}/${model}/${maxTokens ?? ''}`
+    const cached = this.#budgets.get(session)
+    if (cached !== undefined && cached.key === key) return cached.value
+    const resolved = await this.#resolveBudget(provider, model, maxTokens, signal)
+    // A lookup that failed (network, aborted) is retried next step; only a
+    // resolved answer, including a definitive "no capacity", is cached.
+    if (resolved.cacheable) this.#budgets.set(session, { key, value: resolved.value })
+    return resolved.value
+  }
+
+  /**
+   * Resolve one route's budget, without caching.
+   * @param {string} provider - routed provider.
+   * @param {string} model - routed model.
+   * @param {number | undefined} maxTokens - the request's own output cap, when set.
+   * @param {AbortSignal} signal - cancellation for the lookup.
+   * @returns {Promise<{ cacheable: boolean, value: object | undefined }>} the budget and whether it may be cached.
+   */
+  async #resolveBudget(provider, model, maxTokens, signal) {
     let info
     try {
       info = await this.ctx.llm.resolveModelInfo(provider, model, signal)
     } catch (error) {
       signal.throwIfAborted()
-      return undefined
+      return { cacheable: false, value: undefined }
     }
     const contextWindow = info.context?.contextWindow
     if (typeof contextWindow !== 'number' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
-      return undefined
+      return { cacheable: true, value: undefined }
     }
     const reserved = maxTokens ?? info.defaultMaxTokens ?? 0
     const budget = resolveRolloverBudget(this.config, { provider, model }, contextWindow, reserved)
-    if (budget.problem !== undefined) return undefined
-    return { ...budget, contextWindow, reserved }
+    if (budget.problem !== undefined) return { cacheable: true, value: undefined }
+    return { cacheable: true, value: { ...budget, contextWindow, reserved } }
   }
 
   /**
@@ -768,14 +793,17 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
   #registerNotices() {
     if (!this.policy.notices) return
     this.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
-      const notice = await this.#noticeFor(agent)
+      const pending = await this.#noticeFor(agent)
       const before = currentWindowNumber(agent.session)
       const decision = await next()
       if (decision.kind === 'reject' || signal.aborted) return decision
-      if (notice === undefined || currentWindowNumber(agent.session) !== before) return decision
+      if (pending === undefined || currentWindowNumber(agent.session) !== before) return decision
+      // Record only now: a rejected step must not consume the one notice this
+      // window gets for its stage.
+      pending.state.sent.add(pending.stage)
       const message = createUserMessage({
-        content: [{ type: 'text', text: notice.text }],
-        source: { kind: NOTICE_SOURCE_KIND, form: 'notice', summary: notice.summary },
+        content: [{ type: 'text', text: pending.notice.text }],
+        source: { kind: NOTICE_SOURCE_KIND, form: 'notice', summary: pending.notice.summary },
       })
       return { ...decision, messages: [message, ...decision.messages] }
     }, { prepend: true })
@@ -783,8 +811,11 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
 
   /**
    * Choose the notice this step deserves, at most once per window per stage.
+   *
+   * Nothing is recorded here: the caller records the stage after the step is
+   * known to enter, so a rejection does not burn it.
    * @param {object} agent - agent whose session is measured.
-   * @returns {Promise<{ text: string, summary: string } | undefined>} the notice to inject.
+   * @returns {Promise<{ stage: string, notice: { text: string, summary: string }, state: object } | undefined>} the pending notice.
    */
   async #noticeFor(agent) {
     const session = agent.session
@@ -799,17 +830,15 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       : { window, sent: new Set() }
     this.#notices.set(session, state)
     /**
-     * Emit one stage at most once per window.
+     * Offer one stage at most once per window.
      * @param {string} stage - stage key.
-     * @param {() => object} build - notice builder.
-     * @returns {object | undefined} the notice when this stage is new.
+     * @param {() => { text: string, summary: string }} build - notice builder.
+     * @returns {object | undefined} the pending notice when this stage is new.
      */
-    const once = (stage, build) => {
-      if (state.sent.has(stage)) return undefined
-      state.sent.add(stage)
-      return build()
-    }
+    const once = (stage, build) => (state.sent.has(stage) ? undefined : { stage, notice: build(), state })
     if (used >= ceiling) {
+      // Once the note is saved the rollover happens in `compactIfNeeded`; the
+      // notice is only for a window that cannot end yet.
       return noteSavedThisWindow(session).saved ? undefined : once('blocked', blockedNotice)
     }
     if (used >= budget.thresholdTokens) {

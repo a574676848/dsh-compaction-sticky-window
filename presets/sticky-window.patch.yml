@@ -81,6 +81,8 @@
                   thresholdRatio: 0.8
                   retainTokens: 0
                   noteMaxBytes: 6144
+                  auto: false
+                  notices: false
                   noteTool: false
                   sensingTool: false
                   historyTool: false
