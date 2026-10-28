@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Sticky-window context",
-    "description": "Replaces the summarizing context compactor with a carried sticky note plus a verbatim sliding window, so a rollover costs no model call.",
+    "description": "Replaces the summarizing context compactor with a handoff note the model writes itself and a fresh window that keeps only the system prompt, the note, and the current turn.",
     "detail": "docs/DETAIL.md"
   }
 }
