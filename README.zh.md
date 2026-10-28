@@ -235,3 +235,4 @@ node scripts/sync-preset.mjs
 - 把会话切回挂载摘要后端的 preset，会为该会话重新启用它。卸载 bundle 则各处都恢复自带行为。
 - 预算提醒以普通 `user/message` 事件、`sticky-window-notice` 源类型追加。会话格式允许扩展源类型，因此卸载插件后日志仍可读，但旧版读取器不认识这个名字。
 - 在某个 DSH 版本上，如果自带后端在**模型切换**时绕过 `compactIfNeeded` 触发压缩，那次切换仍可能在没通过便签门禁的情况下换窗。目标 0.2.0 线没有这条路径；更晚的线需要本后端一并拦下。
+- 在没有 agent-preset registry 的 profile（仅 base 或 headless 组合）上，本 bundle 对 `agent-preset-registry` 的覆盖匹配不到任何行，加载器会在启动时打印一行 `entry "agent-preset-registry" not found`。这是预期行为——host 平面的替换照常生效，而同一条 patch 在存在该行的 Web 与 Desktop 上才会选中预设。
