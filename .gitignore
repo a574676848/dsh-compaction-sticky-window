@@ -3,3 +3,7 @@ probe.mjs
 *.log
 .DS_Store
 market-cache/
+probe*.mjs
+diag.mjs
+loopcheck.mjs
+
