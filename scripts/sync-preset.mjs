@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * Regenerate the sticky-window agent preset from a DSH installation.
+ * Regenerate the patch that retires the summarizing backend on a preset plane.
  *
  * On Web and Desktop profiles each agent preset mounts its own compaction
- * backend inside an isolated group, so this bundle has to ship a preset of its
- * own. Copying the shipped `standard` preset by hand would drift silently on
- * every DSH release; this script re-derives the copy from the installed preset
- * and rewrites only the compaction group.
+ * backend inside a group that isolates `compaction`, so a profile-level row
+ * cannot reach a session. The supported way to change that backend is to
+ * override the preset declaration by its Loader row id, which replaces the
+ * whole `config` — so this script re-derives the shipped `standard` preset from
+ * the installation and rewrites only its compaction group.
+ *
+ * The preset keeps its id and its place, so a person's selected preset does not
+ * change when this bundle is installed.
  *
  * Usage:
  *   node scripts/sync-preset.mjs [--from <standard.patch.yml>] [--out <file>]
@@ -21,20 +25,23 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-/** Preset id and row id this bundle publishes. */
-const PRESET_ID = 'sticky-window'
-const ROW_ID = 'preset-sticky-window'
-/** The compaction row this bundle replaces inside the preset. */
+/** The shipped preset row this bundle overrides. */
+const TARGET_ROW = '- id: preset-standard'
+/** The compaction row this bundle replaces inside that preset. */
 const REPLACED_ROW = '- id: compaction-basic'
 
 /** Header applied to the generated file. */
 const HEADER = [
-  '# Sticky-window agent preset — GENERATED, do not edit by hand.',
+  '# Standard agent preset, compaction group replaced — GENERATED, do not edit by hand.',
   '#',
-  '# This is the shipped `standard` preset with its isolated compaction group',
-  '# pointed at the sticky-window backend instead of the summarizing one, so a',
-  '# preset-backed profile can retire the old mechanism at all: a profile-level',
-  '# row cannot reach a session whose preset isolates `compaction`.',
+  '# A preset isolates `compaction`, so a profile-level row cannot reach a session',
+  '# that uses one. Overriding this preset by its Loader row id is the supported',
+  '# way in: the whole `config` is replaced, so this file restates the shipped',
+  '# `standard` preset and swaps only its compaction group.',
+  '#',
+  '# The preset keeps its id (`standard`) and its order, so installing this bundle',
+  '# does not change which preset is selected. Every plugin id below is copied from',
+  '# the installation; `sync-preset` refuses to write a file whose id set differs.',
   '#',
   '# Regenerate after a DSH upgrade:  node scripts/sync-preset.mjs',
   '',
@@ -72,42 +79,38 @@ function indentOf(line) {
 }
 
 /**
- * Rewrite one shipped preset into this bundle's preset.
+ * Rewrite the shipped preset into an override of itself.
+ *
+ * The shipped file wraps its declaration in `- insert:`; an override is the same
+ * declaration at the top level of a patch, so the wrapper goes away and every
+ * line below it loses its two-space nesting.
  * @param {string} source - the shipped `standard` patch text.
- * @returns {string} the generated patch text.
- * @throws {Error} when the expected compaction row is absent.
+ * @returns {string} the generated override patch text.
+ * @throws {Error} when the source is not the expected `insert` of one preset.
  */
 function rewrite(source) {
   const lines = source.split('\n')
+  const insertAt = lines.findIndex(line => line.trimEnd() === '- insert:')
+  if (insertAt === -1) throw new Error('source is not a single "- insert:" patch')
+  const rowAt = lines.findIndex((line, index) => index > insertAt && line.trimStart().startsWith(TARGET_ROW))
+  if (rowAt === -1) throw new Error(`source row "${TARGET_ROW}" not found`)
+
   /** @type {string[]} */
   const out = []
   let replaced = false
-  let presetRow = false
-  let presetId = false
   let skipNext = false
-
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
+    if (index < rowAt) continue
     if (skipNext) {
       skipNext = false
       continue
     }
-    if (line.trimStart().startsWith('- id: preset-standard')) {
-      presetRow = true
-      out.push(line.replace('preset-standard', ROW_ID))
-      continue
-    }
-    if (presetRow && /^\s+id: standard$/u.test(line)) {
-      presetId = true
-      out.push(line.replace('id: standard', `id: ${PRESET_ID}`))
-      continue
-    }
-    if (presetRow && presetId && /^\s+order: \d+$/u.test(line)) {
-      out.push(line.replace(/order: \d+/u, 'order: 0'))
-      continue
-    }
-    if (line.trimStart().startsWith(REPLACED_ROW)) {
-      const indent = ' '.repeat(indentOf(line))
-      const child = ' '.repeat(indentOf(line) + 2)
+    // The declaration sits four spaces under `- insert:`; without the wrapper it
+    // becomes a top-level patch entry.
+    const dedented = line.startsWith('    ') ? line.slice(4) : line.trimStart()
+    if (dedented.trimStart().startsWith(REPLACED_ROW)) {
+      const indent = ' '.repeat(indentOf(dedented))
+      const child = ' '.repeat(indentOf(dedented) + 2)
       out.push(
         `${indent}- id: compaction-sticky-window`,
         `${child}name: 'dsh-compaction-sticky-window'`,
@@ -132,41 +135,42 @@ function rewrite(source) {
       skipNext = true
       continue
     }
-    out.push(line)
+    out.push(dedented)
   }
 
-  if (!presetRow) throw new Error('source preset row "- id: preset-standard" not found')
   if (!replaced) throw new Error(`source row "${REPLACED_ROW}" not found; the preset layout changed`)
   return `${HEADER.join('\n')}${out.join('\n')}`
 }
 
 /**
- * Top-level child ids of one preset patch file.
- *
- * Only the children of `config.plugins` sit at ten spaces; a nested group's own
- * children are deeper, and the preset row's siblings (`- insert:`) are shallower.
+ * Plugin ids directly under `config.plugins`, at the given indent width.
  * @param {string} text - a preset patch file.
- * @returns {string[]} its top-level plugin ids, in order.
+ * @param {number} spaces - indentation of those child entries.
+ * @returns {string[]} the ids, in order.
  */
-function topLevelIds(text) {
-  return [...text.matchAll(/^ {10}- id: (\S+)$/gmu)].map(match => match[1])
+function childIds(text, spaces) {
+  const pattern = new RegExp(`^ {${spaces}}- id: (\\S+)$`, 'gmu')
+  return [...text.matchAll(pattern)].map(match => match[1])
 }
 
 /**
- * Refuse to write a snapshot that is not the shipped preset plus one swapped group.
+ * Refuse to write a preset that differs from the shipped one beyond one group.
  *
  * A snapshot that quietly drops a plugin takes tools away from every session
- * that selects it. Comparing the id sets — not the text, which legitimately
- * differs in the compaction group — is what makes that impossible to ship.
- * @param {string} source - the shipped preset patch text.
- * @param {string} generated - the rewritten text.
+ * that uses it. Comparing id sets — not text, which legitimately differs in the
+ * compaction group — is what makes that impossible to ship.
+ * @param {string} shipped - the shipped preset text (children at ten spaces).
+ * @param {string} written - the rewritten text (children at six spaces).
  * @throws {Error} when the two disagree on which plugins exist.
  */
-function assertSameChildren(source, generated) {
-  const shipped = topLevelIds(source)
-  const written = topLevelIds(generated)
-  const missing = shipped.filter(id => !written.includes(id))
-  const added = written.filter(id => !shipped.includes(id))
+function assertSameChildren(shipped, written) {
+  const before = childIds(shipped, 10)
+  const after = childIds(written, 6)
+  const missing = before.filter(id => !after.includes(id))
+  const added = after.filter(id => !before.includes(id))
+  if (before.length === 0 || after.length === 0) {
+    throw new Error('could not read the plugin ids on one side; refusing to write')
+  }
   if (missing.length > 0 || added.length > 0) {
     throw new Error(
       'refusing to write a preset that differs from the shipped one beyond the compaction group:'
@@ -174,6 +178,7 @@ function assertSameChildren(source, generated) {
       + `${added.length > 0 ? ` added [${added.join(', ')}]` : ''}`,
     )
   }
+  return after.length
 }
 
 const argv = process.argv.slice(2)
@@ -183,7 +188,7 @@ const out = option(argv, '--out')
 
 const source = fs.readFileSync(from, 'utf8')
 const generated = rewrite(source)
-assertSameChildren(source, generated)
+const plugins = assertSameChildren(source, generated)
 fs.mkdirSync(path.dirname(out), { recursive: true })
 fs.writeFileSync(out, `${generated.trimEnd()}\n`, 'utf8')
-process.stdout.write(`wrote ${out} from ${from} (${topLevelIds(generated).length} plugins, id set unchanged)\n`)
+process.stdout.write(`wrote ${out} from ${from} (${plugins} plugins, id set unchanged)\n`)

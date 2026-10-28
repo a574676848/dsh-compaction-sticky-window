@@ -30,11 +30,13 @@ The note claims its byte budget before anything else and is never truncated into
 
 A standing prompt section tells the model how the whole loop works, and that it must never surface it to you.
 
-## Adding, never replacing
+## Adding tools, replacing the compactor
 
-Installing this plugin only adds: one compaction backend, one optional agent preset, and four tools. It does not remove a tool and does not change which preset your sessions use.
+Installing adds four tools and replaces the compaction backend. It takes no tool away, and it does not change which agent preset your sessions use.
 
-On a CLI, headless, or SDK profile the backend takes over as soon as the plugin is installed. On Web and Desktop the compaction backend belongs to the agent preset rather than the profile, so the plugin ships one more preset — identical to the shipped `standard` preset except for its compaction group — and leaves the choice to you: **Settings → Agent preset → Sticky window**. Until you pick it, nothing about compaction changes, and no existing tool moves.
+On a CLI, headless, or SDK profile the backend is a profile row: the plugin disables the summarizing one and puts itself in its place. On Web and Desktop the compaction backend belongs to the agent preset, so the plugin overrides the shipped `standard` preset in place — same id, same order, same plugin list — and swaps only its compaction group. Nothing needs selecting: enable the plugin, restart, and new sessions compact with the note.
+
+Your existing tools are untouched: measured on a live profile, enabling went from 108 tools to 112, with nothing removed.
 
 ## What you will see
 

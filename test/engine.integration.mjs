@@ -593,12 +593,25 @@ test('the preset row leaves automation and notices to the host engine', async ()
   assert.doesNotMatch(text, /compaction-basic/u, 'the preset mounts no summarizing backend')
 })
 
+test('the preset is an in-place override, not a second preset to choose', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const text = await readFile(new URL('../presets/sticky-window.patch.yml', import.meta.url), 'utf8')
+
+  // A top-level `- id: preset-standard` row replaces that preset's whole config;
+  // an `insert:` of a new preset would leave the old backend in charge until the
+  // person switched, which is the behaviour this bundle must not require.
+  assert.match(text, /^- id: preset-standard$/mu)
+  assert.doesNotMatch(text, /^- insert:/mu)
+  assert.doesNotMatch(text, /preset-sticky-window/u)
+  assert.match(text, /^ {4}id: standard$/mu, 'the preset keeps its identity')
+  assert.match(text, /compaction-sticky-window/u)
+})
+
 test('installing never changes which preset is selected', async () => {
   const { readFile } = await import('node:fs/promises')
   const host = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
 
-  // Forcing a default preset tears the tools out of every open session; the
-  // bundle ships a preset but never selects it.
+  // Forcing a default preset tears the tools out of every open session.
   assert.doesNotMatch(host, /agent-preset-registry/u)
   assert.match(host, /disabled: true/u, 'the host row still retires the summarizing backend')
 })
