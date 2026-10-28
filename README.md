@@ -1,5 +1,7 @@
 # dsh-compaction-sticky-window
 
+English | [中文](README.zh.md)
+
 A DeepSeek Harness profile bundle that replaces the summarizing context compactor with **a model-written handoff note and a fresh window that keeps almost nothing else**.
 
 The shipped backend condenses an old span into a model-written summary: one extra model call per rollover, and a summary whose contents the model did not choose. This backend inverts the ownership. The model writes its own note with `sticky_note`, opens a new window with `new_context`, and that window starts with the system prompt, the note, and the work in flight — nothing else. One deterministic fallback remains for automatic pressure: if no note was written, the evicted messages are reduced to the facts the log can prove.

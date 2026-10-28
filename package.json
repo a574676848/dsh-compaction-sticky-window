@@ -1,7 +1,7 @@
 {
   "name": "dsh-compaction-sticky-window",
   "version": "0.6.0",
-  "description": "Sticky-note plus sliding-window context handling for DeepSeek Harness: retires the model-written summary and replaces it with a deterministic carried note in front of a verbatim recent window",
+  "description": "Replaces the summarizing context compactor with a handoff note the model writes itself and a fresh window that keeps only the system prompt, the note, and the current turn.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -19,6 +19,7 @@
     "docs",
     "icon.svg",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "icon": "./icon.svg",
@@ -31,7 +32,7 @@
     "dsh-plugin",
     "compaction",
     "context",
-    "sliding-window",
+    "window",
     "sticky-note"
   ],
   "license": "MIT",
@@ -47,6 +48,3 @@
     }
   }
 }
-
-
-
