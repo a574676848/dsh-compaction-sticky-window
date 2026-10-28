@@ -24,6 +24,7 @@ import {
   NOTICE_SOURCE_KIND,
   blockedNotice,
   exhaustedNotice,
+  readyNotice,
   warningNotice,
 } from './src/notice.js'
 import { GUIDANCE_SECTION_NAME, GUIDANCE_SECTION_ORDER, GUIDANCE_TEXT } from './src/guidance.js'
@@ -378,7 +379,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       return saved ? undefined : once('blocked', blockedNotice)
     }
     if (used >= budget.thresholdTokens) {
-      return once('exhausted', () => exhaustedNotice(ceiling - used))
+      // A saved note is the precondition for the rollover, not a reason to ask
+      // for it again: `compactIfNeeded` ends this window in the same step.
+      return saved ? once('ready', readyNotice) : once('exhausted', () => exhaustedNotice(ceiling - used))
     }
     if (budget.thresholdTokens - used <= this.policy.warnTokens) {
       return once('warn', () => warningNotice(budget.thresholdTokens - used))

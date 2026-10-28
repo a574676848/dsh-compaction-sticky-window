@@ -15,6 +15,7 @@ import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { StickyWindowCompactionEngine } from '../index.js'
 import { PINS_CLOSE, PINS_OPEN } from '../src/note.js'
+import { selectRolloverRange } from '../src/window.js'
 
 /**
  * Price one message the way the transaction's estimator does.
@@ -655,6 +656,19 @@ test('a negative budget answer is retried instead of pinned for the session', as
   await new Promise(resolve => setTimeout(resolve, 40))
   const recovered = await engine.compactIfNeeded(agent, 'pressure', signal)
   assert.ok(recovered !== null, 'the budget is resolved again after the interval')
+})
+
+test('one long turn rolls over at its last step instead of refusing', () => {
+  const session = buildSession(6)
+  // Every surface node belongs to the open turn, so no turn boundary names a
+  // cut. The window must still be able to end, and the kept tail must begin a
+  // complete step so no tool result outlives the call that produced it.
+  const range = selectRolloverRange(session)
+  assert.notEqual(range, null, 'a turn that outlived its history still rolls over')
+  assert.ok(range.evicted > 0)
+  const nodes = [...session.surface.nodes]
+  const firstKept = nodes[nodes.indexOf(range.end) + 1]
+  assert.equal(session.eventAt(firstKept).type, 'user/message', 'the kept tail starts a step')
 })
 
 

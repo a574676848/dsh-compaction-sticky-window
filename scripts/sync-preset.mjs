@@ -139,7 +139,58 @@ function rewrite(source) {
   }
 
   if (!replaced) throw new Error(`source row "${REPLACED_ROW}" not found; the preset layout changed`)
-  return `${HEADER.join('\n')}${out.join('\n')}`
+  return `${HEADER.join('\n')}${stripUnregistered(stripSuffixConfig(out)).join('\n')}`
+}
+
+/**
+ * Drop the persona suffix that named the retired `{{cwd}}` variable.
+ *
+ * The shipped preset of an older release carried `suffix: Your working
+ * directory is {{cwd}}.`; the prompt assembler no longer registers `cwd`, so a
+ * preset that still sets it fails assembly before any model request — the whole
+ * session errors out. The block is removed with its now-empty `config:` parent.
+ * @param {string[]} lines - generated patch lines.
+ * @returns {string[]} the lines without that block.
+ */
+function stripSuffixConfig(lines) {
+  /** @type {string[]} */
+  const out = []
+  for (const [index, line] of lines.entries()) {
+    if (!/^\s*suffix:\s*Your working directory is \{\{cwd\}\}\.\s*$/u.test(line)) {
+      out.push(line)
+      continue
+    }
+    const previous = out[out.length - 1]
+    const next = lines[index + 1]
+    // The `config:` wrapper is only useful when it still holds another key.
+    if (previous !== undefined && /^\s*config:\s*$/u.test(previous)
+      && (next === undefined || next.trim() === '' || indentOf(next) <= indentOf(previous))) {
+      out.pop()
+    }
+  }
+  return out
+}
+
+/**
+ * Refuse a snapshot that names a prompt variable the assembler does not register.
+ *
+ * Only `provider` and `model` are registered by the loop; anything else aborts
+ * prompt assembly, so a stale snapshot must not be able to ship one.
+ * @param {string[]} lines - generated patch lines.
+ * @returns {string[]} the same lines, when clean.
+ * @throws {Error} when an unregistered variable is present.
+ */
+function stripUnregistered(lines) {
+  const joined = lines.join('\n')
+  const names = [...joined.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/gu)].map(match => match[1])
+  const unknown = [...new Set(names)].filter(name => name !== 'provider' && name !== 'model')
+  if (unknown.length > 0) {
+    throw new Error(
+      `refusing to write a preset that interpolates unregistered prompt variables: [${unknown.join(', ')}];`
+      + ' the loop registers only provider and model, and any other name aborts prompt assembly',
+    )
+  }
+  return lines
 }
 
 /**

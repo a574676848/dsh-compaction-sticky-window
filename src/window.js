@@ -40,6 +40,24 @@ function lastTurnStartSeq(session) {
 }
 
 /**
+ * Sequence of the most recent step boundary in the log.
+ *
+ * A turn can outlive every node before it: a model that keeps taking steps in
+ * one turn leaves a surface holding nothing older than that turn, and a turn
+ * boundary then names no cut. The step is the next boundary up, and the pairing
+ * walk below still refuses a cut that would strand a tool call.
+ * @param {object} session - the session to inspect.
+ * @returns {number} the last `step/start` seq, or -1 without one.
+ */
+function lastStepStartSeq(session) {
+  let seq = -1
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'step/start') seq = event.seq
+  }
+  return seq
+}
+
+/**
  * Choose the span a rollover evicts.
  *
  * Everything from the first non-system node up to the current turn goes; the
@@ -65,6 +83,21 @@ export function selectRolloverRange(session) {
       if (nodes[index] < turnStart) {
         keepFrom = index + 1
         break
+      }
+    }
+    // A turn that outlived the history it started with leaves no turn boundary
+    // to cut at — every surface node is in the turn in flight. Keep only the
+    // step in flight instead, so a long turn can still roll over.
+    if (keepFrom <= firstIdx) {
+      keepFrom = nodes.length
+      const stepStart = lastStepStartSeq(session)
+      if (stepStart !== -1) {
+        for (let index = nodes.length - 1; index >= 0; index -= 1) {
+          if (nodes[index] < stepStart) {
+            keepFrom = index + 1
+            break
+          }
+        }
       }
     }
   }

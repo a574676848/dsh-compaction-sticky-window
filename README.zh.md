@@ -158,7 +158,7 @@ sequenceDiagram
 
 `context_status` 用的阈值与事务真正触发时完全一致，并会如实报告触发器的拒绝状态（`available: false` 加原因），而不是给一个永远不会触发的漂亮数字。`src/budget.js` 复刻了那套算法并有测试对照。
 
-`new_context` 在工具调用内部完成换窗，区间严格截止到当前 turn 之前，因此本 turn 自己的工具结果仍有 surface 可落。写前门禁是参考实现的行为：没有便签，就没有新窗口。
+`new_context` 在工具调用内部完成换窗，区间严格截止到当前 turn 之前，因此本 turn 自己的工具结果仍有 surface 可落。turn 可能比它之前的历史活得更久：surface 上再无更早节点时，这个边界就指不出切点，于是退到当前 step —— 这仍是能让本 turn 工具结果有 surface 可落的最后一个切点。写前门禁是参考实现的行为：没有便签，就没有新窗口。
 
 `history_query` 读的是日志本来就有的归档：每个 `compaction/summary` 事件记录了它替换掉的 seq，而那些事件永久保留 seq。窗口与条目按 `w<窗口>:<序号>` 命名。
 
@@ -221,7 +221,7 @@ node --test test/note.test.mjs test/engine.integration.mjs
 node scripts/sync-preset.mjs
 ```
 
-`test/engine.integration.mjs` 用手工搭建的 Cordis Context 驱动真实换窗，走的是自带压缩事务，并断言新窗口确实只有便签与当前 turn。
+`test/engine.integration.mjs` 用手工搭建的 Cordis Context 驱动真实换窗，走的是自带压缩事务，并断言新窗口确实只有便签与当前 turn —— 其中包括一个长 turn：它活得比自己之前的历史更久，只能在最后一个 step 换窗。
 
 `node_modules/.` 是开发时指向某个 DSH 安装的本地 junction，用于模块解析，不会发布。
 

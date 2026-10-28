@@ -52,6 +52,23 @@ export function exhaustedNotice(remainingTokens) {
 }
 
 /**
+ * The notice shown when the note is already saved and the window has not ended.
+ *
+ * Asking for a note that is already written is the one instruction a model must
+ * not receive twice: it spends a turn on work that changes nothing. The window
+ * ends on its own at the next boundary, so this notice names that and asks for
+ * nothing.
+ * @returns {{ text: string, summary: string }} the notice.
+ */
+export function readyNotice() {
+  return {
+    summary: 'handoff note saved',
+    text: 'The handoff note is saved, so this window ends at the next boundary on its own. Keep working; '
+      + 'call `sticky_note` again only when something new has to survive the rollover.',
+  }
+}
+
+/**
  * The notice shown when the window is over its ceiling but cannot end yet.
  *
  * Two different situations land here — no note saved, or nothing large enough

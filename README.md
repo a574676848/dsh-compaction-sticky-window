@@ -161,7 +161,7 @@ All four are registered on the host plane; a preset realm inherits them through 
 
 `context_status` prices the same threshold the transaction triggers on, and reports the trigger's own refusals (`available: false` with the reason) rather than a plausible number that would never fire. `src/budget.js` mirrors that arithmetic and is tested against it.
 
-`new_context` performs the rollover inside the tool call, bounded strictly before the current turn, so the turn's own tool results still have a surface to land on. The write-ahead gate is the reference behavior: no note, no new window.
+`new_context` performs the rollover inside the tool call, bounded strictly before the current turn, so the turn's own tool results still have a surface to land on. A turn can outlive everything before it: when no older node is left on the surface, that boundary names no cut, so the rollover falls back to the current step — the last cut that still leaves the turn's own tool results a surface. The write-ahead gate is the reference behavior: no note, no new window.
 
 `history_query` reads the archive the log already holds: each `compaction/summary` event records the seqs it replaced, and those events keep their seqs forever. Windows and items are named `w<window>:<ordinal>`.
 
@@ -224,7 +224,7 @@ node --test test/note.test.mjs test/engine.integration.mjs
 node scripts/sync-preset.mjs
 ```
 
-`test/engine.integration.mjs` drives real rollovers through the shipped compaction transaction with a hand-built Cordis Context, and asserts the fresh window really is the note plus the current turn.
+`test/engine.integration.mjs` drives real rollovers through the shipped compaction transaction with a hand-built Cordis Context, and asserts the fresh window really is the note plus the current turn — including one long turn that has to roll over at its last step because it outlived everything before it.
 
 `node_modules/.` holds a local junction to a DSH installation for module resolution in development and is not published.
 
