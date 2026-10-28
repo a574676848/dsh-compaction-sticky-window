@@ -46,6 +46,16 @@ const DEFAULT_WARNING_TOKENS = 6144
 const DEFAULT_WARN_TOKENS = 6144
 /** Default distance past the rollover line during which a rollover is postponed. */
 const DEFAULT_FALLBACK_TOKENS = 16384
+/**
+ * Default smallest evictable span, in tokens.
+ *
+ * A note carries fixed framing — the transaction's checkpoint preamble, the
+ * note's own lead and tail, its headings — that no configuration shrinks. A
+ * span smaller than that framing cannot be replaced by anything smaller, so the
+ * transaction's shrink check fails and the rollover throws. Refusing below this
+ * size turns a hard failure into a plain "not yet".
+ */
+const DEFAULT_MIN_EVICT_TOKENS = 1024
 /** Default characters returned by one history read. */
 const DEFAULT_HISTORY_READ_MAX_CHARS = 4000
 /** Default hits returned by one history search. */
@@ -74,6 +84,7 @@ export const EXTRA_KEYS = [
   'warningTokens',
   'warnTokens',
   'fallbackTokens',
+  'minEvictTokens',
   'notices',
   'historyReadMaxChars',
   'historySearchLimit',
@@ -139,6 +150,7 @@ export function resolveConfig(config) {
     warningTokens: positiveInteger('warningTokens', config.warningTokens, DEFAULT_WARNING_TOKENS),
     warnTokens: positiveInteger('warnTokens', config.warnTokens, DEFAULT_WARN_TOKENS),
     fallbackTokens: positiveInteger('fallbackTokens', config.fallbackTokens, DEFAULT_FALLBACK_TOKENS),
+    minEvictTokens: positiveInteger('minEvictTokens', config.minEvictTokens, DEFAULT_MIN_EVICT_TOKENS),
     historyReadMaxChars: positiveInteger('historyReadMaxChars', config.historyReadMaxChars, DEFAULT_HISTORY_READ_MAX_CHARS),
     historySearchLimit: positiveInteger('historySearchLimit', config.historySearchLimit, DEFAULT_HISTORY_SEARCH_LIMIT),
     historySnippetChars: positiveInteger('historySnippetChars', config.historySnippetChars, DEFAULT_HISTORY_SNIPPET_CHARS),

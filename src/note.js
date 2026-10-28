@@ -294,11 +294,9 @@ function renderNote(facts, config) {
   const commands = facts.commands.slice(0, config.commandListMax)
   const recorded = [...files, ...commands.map(command => `ran: ${command}`), ...facts.openIssues]
 
-  const lead = 'Sticky window note. The conversation before the current turn was evicted to reclaim context '
-    + 'and is now only reachable through `history_query`. This note is what a fresh window inherits: continue '
-    + 'from it directly, build on it, and do not acknowledge it.'
-  const tail = 'Call `sticky_note` with action `read` to see this list again, or `update` to replace it. '
-    + 'Call `history_query` to list archived windows or read one evicted message by id.'
+  const lead = 'Sticky window note. Everything before the current turn was evicted; only this note and the '
+    + 'archive remain. Continue from it directly and do not acknowledge it.'
+  const tail = '`sticky_note` reads or replaces this list; `history_query` reads the archive.'
   const header = `${NOTE_OPEN_TAG} version="1" window="${facts.window}" evicted-messages="${facts.evicted}">`
   const close = '</sticky-note>'
   const headings = config.derivedAppendix ? [HANDOFF_HEADING, FACTS_HEADING] : [HANDOFF_HEADING]

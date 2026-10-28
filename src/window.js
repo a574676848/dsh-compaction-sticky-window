@@ -54,10 +54,19 @@ export function selectRolloverRange(session) {
   const firstIdx = hasSystemHead(session, nodes) ? 1 : 0
 
   const turnStart = lastTurnStartSeq(session)
-  let keepFrom = turnStart === -1
-    ? nodes.length
-    : nodes.findIndex(seq => seq > turnStart)
-  if (keepFrom === -1) keepFrom = nodes.length
+  let keepFrom = nodes.length
+  if (turnStart !== -1) {
+    // Scan positions, not seqs: a previous rollover inserts the note at an old
+    // position with a newer seq, so the surface is not seq-monotonic. Everything
+    // after the last node that predates this turn is the turn in flight.
+    keepFrom = 0
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      if (nodes[index] < turnStart) {
+        keepFrom = index + 1
+        break
+      }
+    }
+  }
 
   // Never evict the turn in flight, and never split a tool pair at the cut.
   for (let index = keepFrom; index > firstIdx; index -= 1) {

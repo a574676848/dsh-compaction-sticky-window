@@ -552,7 +552,15 @@ function createNewContextTool(engine) {
         }
       }
       const signal = exec.signal ?? new AbortController().signal
-      const result = await engine.compactRegion(range.start, range.end, exec.agent, signal)
+      const result = await engine.rolloverNow(exec.agent, signal)
+      if (result === null) {
+        return {
+          rolled: false,
+          detail: 'The history before this turn is too small to be worth a window change — the note '
+            + 'would be larger than what it replaces. Keep working in this window and write the note '
+            + 'before the budget runs out.',
+        }
+      }
       return {
         rolled: true,
         window: currentWindowNumber(session),
@@ -602,6 +610,10 @@ const CONFIG_SCHEMA = z.object({
   commandListMax: COUNT(),
   pinnedLineMaxChars: COUNT(),
   warningTokens: COUNT(),
+  warnTokens: COUNT(),
+  fallbackTokens: COUNT(),
+  minEvictTokens: COUNT(),
+  notices: z.boolean(),
   historyReadMaxChars: COUNT(),
   historySearchLimit: COUNT(),
   historySnippetChars: COUNT(),
@@ -683,13 +695,13 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
    * @returns {Promise<object | null>} the rollover result, or null when none ran.
    */
   async compactIfNeeded(agent, trigger, signal) {
-    if (trigger === 'context-overflow') return this.#rollover(agent, signal)
+    if (trigger === 'context-overflow') return this.rolloverNow(agent, signal)
     const budget = await this.#budgetFor(agent.session, signal)
     if (budget === undefined) return null
     const used = this.ctx.tokenMeter.measure(agent.session).totalTokens
     if (used < budget.thresholdTokens) return null
     if (!noteSavedThisWindow(agent.session).saved) return null
-    return this.#rollover(agent, signal)
+    return this.rolloverNow(agent, signal)
   }
 
   /**
@@ -722,14 +734,27 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
 
   /**
    * Evict everything before the current turn and replace it with the note.
+   *
+   * A span smaller than `minEvictTokens` is refused rather than attempted: the
+   * note's framing alone can exceed a tiny span, and the transaction then raises
+   * a shrink failure. Refusing keeps a small window a plain no-op.
    * @param {object} agent - agent owning the session.
    * @param {AbortSignal} signal - cancellation signal.
-   * @returns {Promise<object | null>} the result, or null when nothing is evictable.
+   * @returns {Promise<object | null>} the result, or null when nothing worth evicting exists.
    */
-  async #rollover(agent, signal) {
-    this.ctx.get('toolResultPruner')?.pruneSession(agent.session)
-    const range = selectRolloverRange(agent.session)
+  async rolloverNow(agent, signal) {
+    const session = agent.session
+    this.ctx.get('toolResultPruner')?.pruneSession(session)
+    const range = selectRolloverRange(session)
     if (range === null) return null
+    // A range names surface POSITIONS. After a replace the surface is not
+    // seq-monotonic, so the span is sliced by index, never by seq comparison.
+    const nodes = this.ctx.tokenMeter.measure(session).nodes
+    const startIdx = nodes.findIndex(node => node.seq === range.start)
+    const endIdx = nodes.findIndex(node => node.seq === range.end)
+    if (startIdx === -1 || endIdx < startIdx) return null
+    const priced = nodes.slice(startIdx, endIdx + 1).reduce((total, node) => total + node.tokens, 0)
+    if (priced < this.policy.minEvictTokens) return null
     return this.compactRegion(range.start, range.end, agent, signal)
   }
 

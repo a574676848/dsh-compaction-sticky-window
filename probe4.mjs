@@ -1,0 +1,12 @@
+const { Context } = await import("file:///E:/zbg/dsh-compaction-sticky-window/node_modules/@deepseek-ai/cordis/lib/index.js")
+const { StickyWindowCompactionEngine } = await import("file:///E:/zbg/dsh-compaction-sticky-window/index.js")
+const ctx = new Context()
+ctx.provide("tokenMeter", { measure: () => ({ nodes: [] }), estimateMessage: () => 0 })
+ctx.provide("tools", { register: () => () => {} })
+const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+const svc = ctx.compaction
+console.log("instanceof:", svc instanceof StickyWindowCompactionEngine)
+console.log("policy identity:", engine.policy === svc.policy)
+console.log("proxy-ish:", svc !== engine, "| keys:", Object.keys(svc).join(","))
+console.log("method identity (summarize):", engine.summarize === svc.summarize)
+console.log("method identity (compactIfNeeded):", engine.compactIfNeeded === svc.compactIfNeeded)

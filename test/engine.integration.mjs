@@ -422,3 +422,89 @@ test('a warning is pushed before the rollover line and only once', async () => {
   assert.equal(second.messages.length, 0, 'the same stage is not repeated')
 })
 
+test('the loop closes across two windows: carry, archive, recall, sense', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow: 200_000 }, defaultMaxTokens: 0 }),
+  })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false, minEvictTokens: 200 })
+  const session = buildSession(2)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+  const tools = Object.fromEntries(registered.map(tool => [tool.name, tool]))
+  const agent = { session, options: {} }
+  const noteText = () => {
+    const note = session.deriveMessages().find(message => message.source?.kind === 'compact-checkpoint')
+    return note === undefined ? '' : note.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+  }
+
+  appendPin(session, 1, ['Goal: refactor the parser'])
+  openSecondTurn(session)
+  const first = await tools.new_context.execute({}, { agent })
+  assert.equal(first.rolled, true, first.detail)
+  assert.match(noteText(), /- Goal: refactor the parser/u)
+
+  // Grow the fresh window past the minimum span, then roll again.
+  for (let turn = 3; turn <= 5; turn += 1) {
+    session.append('turn/end', { turn: turn - 1, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: `turn ${turn} ${'z'.repeat(6000)}` }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+  }
+  appendPin(session, 5, ['Goal: refactor the parser', 'Progress: lexer landed'])
+  session.append('turn/end', { turn: 5, reason: { kind: 'completed' } })
+  session.append('turn/start', { turn: 6 })
+  session.append('step/start', { turn: 6, step: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `turn 6 ${'z'.repeat(6000)}` }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+
+  const second = await tools.new_context.execute({}, { agent })
+  assert.equal(second.rolled, true, second.detail)
+  assert.match(noteText(), /- Progress: lexer landed/u, 'the newest handoff is carried')
+
+  // The archive grows, and the very first evicted text is still recallable.
+  const windows = await tools.history_query.execute({ action: 'windows' }, { agent })
+  assert.equal(windows.total, 2)
+  const found = await tools.history_query.execute({ action: 'search', query: 'Round 0' }, { agent })
+  assert.ok(found.total > 0, 'the first window is searchable')
+  const read = await tools.history_query.execute({ action: 'read', id: found.hits[0].id }, { agent })
+  assert.equal(read.found, true)
+
+  // The fresh window is tiny, and sensing agrees on the ordinal.
+  assert.ok(session.deriveMessages().length <= 3, `fresh window has ${session.deriveMessages().length} messages`)
+  const status = await tools.context_status.execute({}, { agent })
+  assert.equal(status.available, true)
+  assert.equal(status.window, 3)
+})
+
+test('a rollover is refused when the evictable span is smaller than the note', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(1)
+  appendPin(session, 1, ['tiny'])
+  openSecondTurn(session)
+
+  const rollover = registered.find(tool => tool.name === 'new_context')
+  const value = await rollover.execute({}, { agent: { session, options: {} } })
+
+  assert.equal(value.rolled, false)
+  assert.match(value.detail, /too small to be worth a window change/u)
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'compaction/summary').length, 0)
+})
+
+
