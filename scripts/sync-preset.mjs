@@ -113,7 +113,7 @@ function rewrite(source) {
         `${child}name: 'dsh-compaction-sticky-window'`,
         `${child}config:`,
         `${child}  thresholdRatio: 0.8`,
-        `${child}  retainRatio: 0.35`,
+        `${child}  retainTokens: 0`,
         `${child}  noteMaxBytes: 6144`,
         // This row only supplies the compaction service. The tools and the
         // prompt protocol are registered once, on the host plane, and the
@@ -123,6 +123,7 @@ function rewrite(source) {
         `${child}  noteTool: false`,
         `${child}  sensingTool: false`,
         `${child}  historyTool: false`,
+        `${child}  newContextTool: false`,
         `${child}  guidance: false`,
       )
       replaced = true

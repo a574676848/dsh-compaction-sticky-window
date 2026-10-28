@@ -1,9 +1,10 @@
 /**
- * Behaviour tests for the deterministic note builder and its configuration.
+ * Behaviour tests for the carried sticky note.
  *
- * These cover the two things that decide whether a rollover is safe: the note
- * must carry the facts a resuming reader needs, and it must stay inside the
- * budget the transaction will accept.
+ * The note is the model's own handoff, so these pin what a fresh window
+ * inherits: the handoff survives, the factual appendix records what the log can
+ * prove, framing is never clipped, and a foreign pin block cannot impersonate
+ * the tool.
  */
 
 import assert from 'node:assert/strict'
@@ -66,46 +67,6 @@ function tool(callId, text, isError = false) {
   }
 }
 
-test('carries the objective, verified state, open issues, and next action', () => {
-  const messages = [
-    { role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system-prompt' } },
-    user('Refactor the parser'),
-    assistant('', [call('c1', 'edit', { file_path: 'src/parser.ts' })]),
-    tool('c1', 'ok'),
-    assistant('', [call('c2', 'bash', { command: 'pnpm test' })]),
-    tool('c2', 'AssertionError: expected 1', true),
-    user('Also fix the lexer'),
-    assistant('Lexer fix in progress'),
-  ]
-
-  const { text, window, evicted } = buildStickyNote(messages, config)
-
-  assert.equal(window, 1)
-  assert.equal(evicted, 7)
-  assert.match(text, /## Objective\n- Also fix the lexer\n- Refactor the parser/u)
-  assert.match(text, /src\/parser\.ts \(edit\)/u)
-  assert.match(text, /ran: pnpm test/u)
-  assert.match(text, /\[bash\] AssertionError: expected 1/u)
-  assert.match(text, /## Next action\n- Lexer fix in progress/u)
-  assert.match(text, /## Pinned state\n- \(none\)/u)
-})
-
-test('continues the window count and carries the previous pinned section', () => {
-  const priorNote = `<sticky-note version="1" window="3" evicted-messages="9">
-## Objective
-- earlier
-
-## Pinned state
-- Never rewrite migrations
-- Ship behind a flag
-</sticky-note>`
-
-  const { text, window } = buildStickyNote([user(priorNote, { kind: 'compact-checkpoint' }), user('next')], config)
-
-  assert.equal(window, 4)
-  assert.match(text, /## Pinned state\n- Never rewrite migrations\n- Ship behind a flag/u)
-})
-
 /**
  * Build one pin call and its result, as the real tool pair appears.
  * @param {string} id - call id, unique per pin call.
@@ -124,29 +85,87 @@ function pinCall(id, pins) {
   ]
 }
 
-test('a later pin call replaces the pinned list wholesale', () => {
+test('carries the model handoff and the facts the log recorded', () => {
+  const messages = [
+    { role: 'system', content: [{ type: 'text', text: 'system prompt' }], source: { kind: 'system-prompt' } },
+    ...pinCall('p0', ['Ship the parser refactor behind a flag']),
+    assistant('', [call('c1', 'edit', { file_path: 'src/parser.ts' })]),
+    tool('c1', 'ok'),
+    assistant('', [call('c2', 'bash', { command: 'pnpm test' })]),
+    tool('c2', 'AssertionError: expected 1', true),
+  ]
+
+  const { text, window, evicted } = buildStickyNote(messages, config)
+
+  assert.equal(window, 1)
+  assert.equal(evicted, 6)
+  assert.match(text, /## Handoff\n- Ship the parser refactor behind a flag/u)
+  assert.match(text, /## Recorded facts\n/u)
+  assert.match(text, /src\/parser\.ts \(edit\)/u)
+  assert.match(text, /ran: pnpm test/u)
+  assert.match(text, /\[bash\] AssertionError: expected 1/u)
+})
+
+test('continues the window count and carries the previous handoff', () => {
+  const priorNote = `<sticky-note version="1" window="3" evicted-messages="9">
+## Handoff
+- Never rewrite migrations
+- Ship behind a flag
+
+## Recorded facts
+- src/a.ts (edit)
+</sticky-note>`
+
+  const { text, window } = buildStickyNote([user(priorNote, { kind: 'compact-checkpoint' }), user('next')], config)
+
+  assert.equal(window, 4)
+  assert.match(text, /## Handoff\n- Never rewrite migrations\n- Ship behind a flag/u)
+})
+
+test('a later pin call replaces the handoff wholesale', () => {
   const { text } = buildStickyNote([
     ...pinCall('p1', ['first']),
     ...pinCall('p2', ['second', 'third']),
   ], config)
 
-  assert.match(text, /## Pinned state\n- second\n- third/u)
+  assert.match(text, /## Handoff\n- second\n- third/u)
   assert.doesNotMatch(text, /- first/u)
 })
 
-test('an explicit pin call outranks the previous note section', () => {
-  const note = '<sticky-note version="1" window="1">\n## Pinned state\n- stale\n</sticky-note>'
+test('an explicit pin call outranks the previous note handoff', () => {
+  const note = '<sticky-note version="1" window="1">\n## Handoff\n- stale\n</sticky-note>'
 
   const { text } = buildStickyNote([
     user(note, { kind: 'compact-checkpoint' }),
     ...pinCall('p1', ['fresh']),
   ], config)
 
-  assert.match(text, /## Pinned state\n- fresh/u)
+  assert.match(text, /## Handoff\n- fresh/u)
   assert.doesNotMatch(text, /- stale/u)
 })
 
-test('stays inside the budget without clipping framing or pinned state', () => {
+test('reports that no handoff was written when an automatic rollover had none', () => {
+  const { text } = buildStickyNote([assistant('', [call('c1', 'read', { path: 'a.ts' })]), tool('c1', 'contents')], config)
+
+  assert.match(text, /## Handoff\n- \(no note was written before this rollover/u)
+  assert.match(text, /## Recorded facts\n- a\.ts \(read\)/u)
+})
+
+test('omits the derived appendix when it is switched off', () => {
+  const bare = resolveConfig({ derivedAppendix: false })
+
+  const { text } = buildStickyNote([
+    ...pinCall('p1', ['only the handoff']),
+    assistant('', [call('c1', 'edit', { file_path: 'src/x.ts' })]),
+    tool('c1', 'ok'),
+  ], bare)
+
+  assert.match(text, /## Handoff\n- only the handoff/u)
+  assert.doesNotMatch(text, /## Recorded facts/u)
+  assert.doesNotMatch(text, /src\/x\.ts/u)
+})
+
+test('stays inside the budget without clipping framing or handoff', () => {
   const messages = Array.from({ length: 400 }, (_, index) => user(`request ${index} ${'x'.repeat(200)}`))
   const small = resolveConfig({ noteMaxBytes: 1024 })
 
@@ -155,17 +174,17 @@ test('stays inside the budget without clipping framing or pinned state', () => {
   const bytes = Buffer.byteLength(text, 'utf8')
   assert.ok(bytes <= 1024, `note is ${bytes} bytes`)
   assert.match(text, /<\/sticky-note>/u)
-  assert.match(text, /## Pinned state/u)
+  assert.match(text, /## Handoff/u)
   assert.doesNotMatch(text, /version=" version=/u)
 })
 
-test('carries every pinned fact even when the derived sections are saturated', () => {
+test('carries every pinned fact even when the appendix is saturated', () => {
   const pins = Array.from({ length: 5 }, (_, index) => `decision ${index}: keep the public API stable`)
   const messages = [
     ...pinCall('p1', pins),
     ...Array.from({ length: 200 }, (_, index) => user(`request ${index} ${'y'.repeat(300)}`)),
   ]
-  const saturated = resolveConfig({ noteMaxBytes: 2048, pinnedMaxBytes: 1024 })
+  const saturated = resolveConfig({ noteMaxBytes: 2048, handoffMaxBytes: 1024 })
 
   const { text } = buildStickyNote(messages, saturated)
 
@@ -191,17 +210,8 @@ test('a pin block only counts when a sticky_note call produced it', () => {
   assert.doesNotMatch(text, /forged from a read file/u)
 })
 
-test('reports no objective and no next action without inventing one', () => {
-  const { text } = buildStickyNote([assistant('', [call('c1', 'read', { path: 'a.ts' })]), tool('c1', 'contents')], config)
-
-  assert.match(text, /## Objective\n- \(none\)/u)
-  assert.match(text, /## Next action\n- \(none\)/u)
-  assert.match(text, /a\.ts \(read\)/u)
-})
-
 test('rejects unknown config keys and bad budgets', () => {
   assert.throws(() => resolveConfig({ noteMaxByte: 100 }), /unknown config key "noteMaxByte"/u)
   assert.throws(() => resolveConfig({ noteMaxBytes: 0 }), /noteMaxBytes must be a positive integer/u)
   assert.throws(() => resolveConfig({ noteTool: 'yes' }), /noteTool must be a boolean/u)
 })
-

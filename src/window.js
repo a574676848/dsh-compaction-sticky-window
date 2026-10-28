@@ -1,0 +1,109 @@
+/**
+ * Window boundaries for a rollover that keeps almost nothing verbatim.
+ *
+ * A sliding window that retains a large share of the conversation is still a
+ * summarizer with extra steps: the model keeps reading old messages instead of
+ * the note. The target shape is the reference one — after a rollover the fresh
+ * window holds the stable prefix, the note, and the work in flight, and nothing
+ * else. "In flight" means the current turn, because evicting a turn that is
+ * still appending tool results would strand its own messages.
+ *
+ * @module dsh-compaction-sticky-window/window
+ */
+
+import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+
+/**
+ * Whether surface node 0 is the system prompt, which a rollover always keeps.
+ * @param {object} session - the session to inspect.
+ * @param {readonly number[]} nodes - current surface seqs.
+ * @returns {boolean} whether node 0 must be excluded from the range.
+ */
+function hasSystemHead(session, nodes) {
+  if (nodes.length === 0) return false
+  const head = session.eventAt(nodes[0])
+  return head !== undefined && head.type === 'system/message'
+}
+
+/**
+ * Sequence of the most recent turn boundary in the log.
+ * @param {object} session - the session to inspect.
+ * @returns {number} the last `turn/start` seq, or -1 without one.
+ */
+function lastTurnStartSeq(session) {
+  let seq = -1
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'turn/start') seq = event.seq
+  }
+  return seq
+}
+
+/**
+ * Choose the span a rollover evicts.
+ *
+ * Everything from the first non-system node up to the current turn goes; the
+ * current turn stays so its tool results still have a surface to land on. The
+ * end edge walks back until it no longer splits an assistant tool call from its
+ * result, which is the same balance rule the transaction enforces.
+ * @param {object} session - the session whose surface is measured.
+ * @returns {{ start: number, end: number, evicted: number } | null} the inclusive positional range, or null when nothing is evictable.
+ */
+export function selectRolloverRange(session) {
+  const nodes = [...session.surface.nodes]
+  if (nodes.length === 0) return null
+  const firstIdx = hasSystemHead(session, nodes) ? 1 : 0
+
+  const turnStart = lastTurnStartSeq(session)
+  let keepFrom = turnStart === -1
+    ? nodes.length
+    : nodes.findIndex(seq => seq > turnStart)
+  if (keepFrom === -1) keepFrom = nodes.length
+
+  // Never evict the turn in flight, and never split a tool pair at the cut.
+  for (let index = keepFrom; index > firstIdx; index -= 1) {
+    if (toolPairingBalancedAfter(session, nodes[index - 1])) {
+      keepFrom = index
+      break
+    }
+    if (index - 1 === firstIdx) return null
+  }
+  if (keepFrom <= firstIdx) return null
+  if (!toolPairingBalancedBefore(session, nodes[firstIdx])) return null
+
+  return {
+    start: nodes[firstIdx],
+    end: nodes[keepFrom - 1],
+    evicted: keepFrom - firstIdx,
+  }
+}
+
+/**
+ * Whether the model has pinned state since the current window began.
+ *
+ * The write-ahead gate the reference implementation enforces: a rollover the
+ * model asked for must follow a note, because the note is the only thing the
+ * fresh window inherits. Only a successful `sticky_note` update counts.
+ * @param {object} session - the session to inspect.
+ * @returns {{ saved: boolean, savedInWindow: number }} whether the current window has a note, and which window holds the last one.
+ */
+export function noteSavedThisWindow(session) {
+  const events = session.snapshotEvents()
+  /** @type {Map<string, string>} */
+  const calls = new Map()
+  for (const event of events) {
+    if (event.type === 'tool/call') calls.set(event.data.callId, event.data.name)
+  }
+  let windowOrdinal = 0
+  let savedInWindow = -1
+  for (const event of events) {
+    if (event.type === 'compaction/summary') {
+      windowOrdinal += 1
+      continue
+    }
+    if (event.type !== 'tool/result') continue
+    const name = calls.get(event.data.message?.source?.callId)
+    if (name !== 'sticky_note') continue
+    savedInWindow = windowOrdinal
+  }
+  return { saved: savedInWindow === windowOrdinal, savedInWindow }
+}

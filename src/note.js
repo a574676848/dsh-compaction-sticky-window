@@ -1,12 +1,15 @@
 /**
  * Deterministic construction of the carried sticky note.
  *
- * The note is the only thing that survives a window slide, so it is built from
- * the evicted messages themselves rather than from a model call: the same
- * input always yields the same note, which keeps replay exact and costs no
- * tokens. Sections name what a resuming reader must know — the objective, what
- * was verified, what is still open, and what to do next — and the model's own
- * pinned facts ride along verbatim.
+ * The note is the only thing a fresh window inherits, and it is the model's own
+ * handoff: the pinned list it wrote with `sticky_note`. That is the reference
+ * shape — a writer that decides what matters, not a summarizer that guesses.
+ *
+ * Two things here are derived rather than written. The factual appendix records
+ * what the conversation demonstrably did — files touched, commands run, tool
+ * results that failed — because a model can forget a path but the log cannot.
+ * And the window/eviction counts come from the note itself. Everything else is
+ * the model's words, carried unchanged.
  *
  * @module dsh-compaction-sticky-window/note
  */
@@ -23,9 +26,14 @@ export const PINS_OPEN = '<sticky-note-pins>'
 export const PINS_CLOSE = '</sticky-note-pins>'
 /** Tool whose result is the only place a pin block may come from. */
 export const PIN_TOOL_NAME = 'sticky_note'
-
+/** Heading carrying the model's own handoff. */
+export const HANDOFF_HEADING = '## Handoff'
+/** Heading carrying facts derived from the evicted messages. */
+export const FACTS_HEADING = '## Recorded facts'
 /** Text shown when a section has nothing to report. */
 const NONE = '- (none)'
+/** Shown when an automatic rollover ran without a note behind it. */
+const NO_NOTE = '- (no note was written before this rollover; the facts below are what the conversation recorded)'
 
 /**
  * Collect every `tool-call` block into an id-keyed index.
@@ -85,12 +93,11 @@ function parseArguments(raw) {
 const PATH_KEYS = /^(?:file_path|filePath|path|paths|target|notebook_path)$/u
 /** Argument keys that name a command the call executed. */
 const COMMAND_KEYS = /^(?:command|cmd|script)$/u
+/** Deepest argument nesting the walk inspects. */
+const ARGUMENT_WALK_DEPTH = 3
 
 /**
  * Walk an argument object for path and command values.
- *
- * The walk is bounded by depth so a deeply nested or self-referential payload
- * cannot stall the compaction. Only string leaves under recognized keys count.
  * @param {Record<string, unknown>} value - parsed arguments.
  * @param {number} depth - remaining traversal depth.
  * @param {{ paths: string[], commands: string[] }} out - accumulators.
@@ -113,9 +120,6 @@ function walkArguments(value, depth, out) {
   }
 }
 
-/** Deepest argument nesting the walk inspects. */
-const ARGUMENT_WALK_DEPTH = 3
-
 /**
  * Collapse whitespace and clip one line to a character budget.
  * @param {string} text - raw text, possibly multi-line.
@@ -130,9 +134,6 @@ function oneLine(text, maxChars) {
 
 /**
  * Read the newest pinned-fact block from one text, if it holds one.
- *
- * A pin call renders its whole list, so the last block in a text is the
- * authoritative one; an earlier block is already superseded.
  * @param {string} text - message text that may contain a pin block.
  * @returns {string[] | null} pinned lines, or null without a block.
  */
@@ -148,7 +149,7 @@ export function extractPins(text) {
 }
 
 /**
- * Read the newest pinned-fact block from the messages a pin tool produced.
+ * Read the newest pinned-fact block the pin tool produced.
  *
  * Provenance matters: the markers are ordinary text, so a file the agent read
  * could contain them. Only a result answering a `sticky_note` call counts.
@@ -169,35 +170,32 @@ function readPinnedBlocks(messages, calls) {
 }
 
 /**
- * Recover the previous note's pinned section and continuation number.
- *
- * The note itself is a user message on the surface, so it is read exactly like
- * any other evicted content rather than from side storage.
+ * Recover the previous note's handoff section and continuation number.
  * @param {readonly object[]} messages - evicted messages in surface order.
- * @returns {{ window: number, pinned: string[] }} prior note state.
+ * @returns {{ window: number, handoff: string[] }} prior note state.
  */
 function readPreviousNote(messages) {
   let window = 0
   /** @type {string[]} */
-  let pinned = []
+  let handoff = []
   for (const message of messages) {
     const text = textOf(message)
     const start = text.lastIndexOf(NOTE_OPEN_PREFIX)
     if (start === -1) continue
     const match = NOTE_WINDOW_ATTRIBUTE.exec(text.slice(start, start + 120))
     if (match !== null) window = Math.max(window, Number(match[1]))
-    pinned = pinnedSection(text) ?? pinned
+    handoff = sectionBody(text, HANDOFF_HEADING) ?? sectionBody(text, '## Pinned state') ?? handoff
   }
-  return { window, pinned }
+  return { window, handoff }
 }
 
 /**
- * Extract the pinned-state bullets from one rendered note.
+ * Extract one heading's bullets from a rendered note.
  * @param {string} text - text containing a previously rendered note.
+ * @param {string} heading - exact heading line to read.
  * @returns {string[] | null} the bullets, or null when the section is absent.
  */
-function pinnedSection(text) {
-  const heading = '## Pinned state'
+function sectionBody(text, heading) {
   const start = text.lastIndexOf(heading)
   if (start === -1) return null
   const rest = text.slice(start + heading.length)
@@ -211,76 +209,51 @@ function pinnedSection(text) {
 }
 
 /**
- * Gather every section's raw material from the evicted messages.
+ * Gather the model's handoff and the facts the conversation recorded.
  * @param {readonly object[]} messages - evicted messages in surface order.
- * @param {import('./config.js').NoteConfig} config - resolved note policy.
+ * @param {import('./config.js').ResolvedConfig} config - resolved policy.
  * @returns {object} collected facts before rendering.
  */
 function collectFacts(messages, config) {
   const calls = indexToolCalls(messages)
-  /** @type {{ objective: string[], files: Map<string, Set<string>>, commands: string[], openIssues: string[] }} */
-  const facts = { objective: [], files: new Map(), commands: [], openIssues: [] }
-  const pins = readPinnedBlocks(messages, calls)
+  /** @type {{ files: Map<string, Set<string>>, commands: string[], openIssues: string[] }} */
+  const facts = { files: new Map(), commands: [], openIssues: [] }
   const previous = readPreviousNote(messages)
-  let nextAction = ''
+  const pins = readPinnedBlocks(messages, calls)
 
   for (const message of messages) {
-    switch (message.role) {
-      case 'user': {
-        if (message.source?.kind === 'user') {
-          const text = oneLine(textOf(message), config.pinnedLineMaxChars)
-          if (text.length > 0) facts.objective.push(text)
+    if (message.role !== 'tool') continue
+    const call = calls.get(message.source?.callId)
+    if (call !== undefined) {
+      const args = parseArguments(call.arguments)
+      if (args !== null) {
+        const found = { paths: [], commands: [] }
+        walkArguments(args, ARGUMENT_WALK_DEPTH, found)
+        for (const path of found.paths) {
+          const tools = facts.files.get(path) ?? new Set()
+          tools.add(call.name)
+          facts.files.set(path, tools)
         }
-        break
-      }
-      case 'assistant': {
-        const text = oneLine(textOf(message), config.pinnedLineMaxChars)
-        if (text.length > 0) nextAction = text
-        break
-      }
-      case 'tool': {
-        const call = calls.get(message.source?.callId)
-        if (call !== undefined) {
-          const args = parseArguments(call.arguments)
-          if (args !== null) {
-            const found = { paths: [], commands: [] }
-            walkArguments(args, ARGUMENT_WALK_DEPTH, found)
-            for (const path of found.paths) {
-              const tools = facts.files.get(path) ?? new Set()
-              tools.add(call.name)
-              facts.files.set(path, tools)
-            }
-            for (const command of found.commands) {
-              if (!facts.commands.includes(command)) facts.commands.push(command)
-            }
-          }
+        for (const command of found.commands) {
+          if (!facts.commands.includes(command)) facts.commands.push(command)
         }
-        if (message.isError === true) {
-          const text = oneLine(textOf(message), config.pinnedLineMaxChars)
-          facts.openIssues.push(`[${call?.name ?? 'tool'}] ${text.length === 0 ? '(no message)' : text}`)
-        }
-        break
       }
-      default:
-        break
+    }
+    if (message.isError === true) {
+      const text = oneLine(textOf(message), config.pinnedLineMaxChars)
+      facts.openIssues.push(`[${call?.name ?? 'tool'}] ${text.length === 0 ? '(no message)' : text}`)
     }
   }
 
-  facts.objective = facts.objective.slice(-config.objectiveMessages).reverse()
   return {
     ...facts,
-    nextAction,
-    pinned: pins.length > 0 ? pins : previous.pinned,
+    handoff: pins.length > 0 ? pins : previous.handoff,
     window: previous.window + 1,
   }
 }
 
 /**
  * Render one bullet list, clipped to a byte budget.
- *
- * A section that cannot fit anything says so with `(none)` rather than a
- * truncation marker, because the marker itself would exceed a zero budget and
- * push the note past the size the transaction will accept.
  * @param {readonly string[]} lines - bullet bodies without the marker.
  * @param {number} maxBytes - UTF-8 budget for the whole section body.
  * @returns {string} the rendered section body.
@@ -304,24 +277,12 @@ function renderBullets(lines, maxBytes) {
 }
 
 /**
- * Space the fixed parts of the note occupy.
- * @param {string} lead - opening paragraph.
- * @param {string} header - the open tag.
- * @param {string} tail - closing paragraph.
- * @param {readonly string[]} headings - section headings, in display order.
- * @returns {number} bytes unavailable to section bodies.
- */
-function framingBytes(lead, header, tail, headings) {
-  return Buffer.byteLength([lead, header, tail, ...headings].join('\n\n'), 'utf8')
-}
-
-/**
- * Assemble the note text from collected facts.
+ * Assemble the note text.
  *
- * Budget is allocated before rendering, not clipped after: the pinned list is
- * the only model-authored content the note carries, so it claims its budget
- * first and the derived sections take what remains. Framing is never part of
- * the allocatable budget, which is what keeps the closing tag intact.
+ * The handoff claims its budget first because it is the only model-authored
+ * content the fresh window gets; the factual appendix takes what remains.
+ * Framing is never part of the allocatable budget, so the closing tag cannot be
+ * lost.
  * @param {object} facts - output of {@link collectFacts}.
  * @param {import('./config.js').ResolvedConfig} config - resolved policy.
  * @returns {string} the complete note text for the checkpoint message.
@@ -331,36 +292,31 @@ function renderNote(facts, config) {
     .slice(0, config.fileListMax)
     .map(([path, tools]) => `${path} (${[...tools].join(', ')})`)
   const commands = facts.commands.slice(0, config.commandListMax)
+  const recorded = [...files, ...commands.map(command => `ran: ${command}`), ...facts.openIssues]
 
-  const lead = 'Sticky window note. Everything before the retained messages was evicted to reclaim context; '
-    + 'this note is the durable state carried forward. Treat it as established background, continue directly, and do not acknowledge it.'
-  const tail = 'Pin decisions this note cannot infer with the `sticky_note` tool before the next eviction.'
+  const lead = 'Sticky window note. The conversation before the current turn was evicted to reclaim context '
+    + 'and is now only reachable through `history_query`. This note is what a fresh window inherits: continue '
+    + 'from it directly, build on it, and do not acknowledge it.'
+  const tail = 'Call `sticky_note` with action `read` to see this list again, or `update` to replace it. '
+    + 'Call `history_query` to list archived windows or read one evicted message by id.'
   const header = `${NOTE_OPEN_TAG} version="1" window="${facts.window}" evicted-messages="${facts.evicted}">`
   const close = '</sticky-note>'
-  const PINNED_HEADING = '## Pinned state'
-  const headings = ['## Objective', '## Verified state', '## Open issues', '## Next action', PINNED_HEADING]
+  const headings = config.derivedAppendix ? [HANDOFF_HEADING, FACTS_HEADING] : [HANDOFF_HEADING]
 
-  let available = Math.max(0, config.noteMaxBytes - framingBytes(lead, header, tail, headings))
+  let available = Math.max(0, config.noteMaxBytes - Buffer.byteLength(
+    [lead, tail, header, close, ...headings].join('\n\n'), 'utf8',
+  ))
 
-  // Claim order, most load-bearing first; display order is fixed below.
-  const plan = [
-    [PINNED_HEADING, facts.pinned, config.pinnedMaxBytes],
-    ['## Objective', facts.objective, config.objectiveMaxBytes],
-    ['## Next action', facts.nextAction.length === 0 ? [] : [facts.nextAction], config.objectiveMaxBytes],
-    ['## Open issues', facts.openIssues, config.openIssueMaxBytes],
-    ['## Verified state', [...files, ...commands.map(command => `ran: ${command}`)], config.verifiedMaxBytes],
-  ]
-  /** @type {Map<string, string>} */
-  const bodies = new Map()
-  for (const [heading, lines, cap] of plan) {
-    const budget = Math.min(cap, available)
-    const body = renderBullets(lines, budget)
-    bodies.set(heading, body)
-    available -= Buffer.byteLength(body, 'utf8') + 2
+  const handoff = facts.handoff.length === 0 ? NO_NOTE : null
+  const handoffBody = handoff ?? renderBullets(facts.handoff, Math.min(config.handoffMaxBytes, available))
+  available -= Buffer.byteLength(handoffBody, 'utf8') + 2
+  const sections = [`${HANDOFF_HEADING}\n${handoffBody}`]
+  if (config.derivedAppendix) {
+    const body = renderBullets(recorded, Math.min(config.recordedMaxBytes, available))
+    sections.push(`${FACTS_HEADING}\n${body}`)
   }
 
-  const body = headings.map(heading => `${heading}\n${bodies.get(heading) ?? NONE}`).join('\n\n')
-  return `${lead}\n\n${header}\n${body}\n${close}\n\n${tail}`
+  return `${lead}\n\n${header}\n${sections.join('\n\n')}\n${close}\n\n${tail}`
 }
 
 /**

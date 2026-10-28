@@ -14,6 +14,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { StickyWindowCompactionEngine } from '../index.js'
+import { PINS_CLOSE, PINS_OPEN } from '../src/note.js'
 
 /**
  * Price one message the way the transaction's estimator does.
@@ -119,8 +120,8 @@ test('a rollover replaces the evicted span with the sticky note', async () => {
   assert.ok(checkpoint, 'a compact-checkpoint message is on the surface')
   const text = checkpoint.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
   assert.match(text, /<sticky-note version="1" window="1"/u)
-  assert.match(text, /## Objective\n- Round 11/u)
-  assert.match(text, /src\/module-0\.ts \(edit\)/u)
+  assert.match(text, /## Handoff/u)
+  assert.match(text, /## Recorded facts\n- src\/module-0\.ts \(edit\)/u)
   assert.ok(after.length < before.length, 'the surface shrank')
 
   // The transaction recorded exactly one closed bracket and nothing threw.
@@ -130,7 +131,10 @@ test('a rollover replaces the evicted span with the sticky note', async () => {
   assert.equal(types.filter(type => type === 'compaction/end').length, 1)
 
   // The pin tool was registered as an effect of constructing the engine.
-  assert.deepEqual(registered.map(tool => tool.name).sort(), ['context_status', 'history_query', 'sticky_note'])
+  assert.deepEqual(
+    registered.map(tool => tool.name).sort(),
+    ['context_status', 'history_query', 'new_context', 'sticky_note'],
+  )
 })
 
 test('the summary record names this backend and claims no model call', async () => {
@@ -248,5 +252,102 @@ test('context_status reports a trigger refusal instead of a plausible number', a
 
   assert.equal(value.available, false)
   assert.match(value.reason, /leaving no pressure budget|leaving no message budget/u)
+})
+
+/**
+ * Append one ``sticky_note`` call and its result, the way the loop records it.
+ * @param {Session} session - session receiving the pair.
+ * @param {number} turn - owning turn number.
+ * @param {string[]} pins - pinned lines.
+ * @returns {void}
+ */
+function appendPin(session, turn, pins) {
+  const callId = `pin-${turn}`
+  const args = JSON.stringify({ action: 'update', pins })
+  session.append('assistant/message', {
+    stream: [],
+    turn,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: callId, name: 'sticky_note', arguments: args }],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('tool/call', { turn, step: 1, callId, name: 'sticky_note', arguments: args })
+  session.append('tool/result', {
+    turn,
+    step: 1,
+    message: createMessage({
+      role: 'tool',
+      content: [{ type: 'text', text: `${PINS_OPEN}\n${pins.map(pin => `- ${pin}`).join('\n')}\n${PINS_CLOSE}` }],
+      source: { kind: 'tool', callId },
+      toolCallId: callId,
+    }),
+  }, { surfaceOp: 'append' })
+}
+
+/**
+ * Open a second turn on a session built by {@link buildSession}.
+ * @param {Session} session - session to extend.
+ * @returns {void}
+ */
+function openSecondTurn(session) {
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  session.append('turn/start', { turn: 2 })
+  session.append('step/start', { turn: 2, step: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'Continue with the current turn' }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+}
+
+test('new_context refuses to roll over before a note is saved', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(6)
+  openSecondTurn(session)
+
+  const rollover = registered.find(tool => tool.name === 'new_context')
+  const value = await rollover.execute({}, { agent: { session, options: {} } })
+
+  assert.equal(value.rolled, false)
+  assert.match(value.detail, /No note is saved in this window/u)
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'compaction/summary').length, 0)
+})
+
+test('new_context rolls over to a fresh window that keeps only the note and the turn', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(6)
+  appendPin(session, 1, ['Keep the public API stable', 'Parser refactor is half done'])
+  openSecondTurn(session)
+
+  const before = [...session.surface.nodes].length
+  const rollover = registered.find(tool => tool.name === 'new_context')
+  const value = await rollover.execute({}, { agent: { session, options: {} } })
+
+  assert.equal(value.rolled, true)
+  assert.ok(value.evicted >= 18, `evicted ${value.evicted} messages`)
+
+  // The fresh window is the note plus the current turn, not a retained tail.
+  const after = session.deriveMessages()
+  assert.ok(after.length <= 4, `fresh window has ${after.length} messages`)
+  const note = after.find(message => message.source?.kind === 'compact-checkpoint')
+  assert.ok(note, 'the note is on the surface')
+  const text = note.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+  assert.match(text, /- Keep the public API stable/u)
+  assert.match(text, /- Parser refactor is half done/u)
+  assert.ok(after.some(message => message.role === 'user'
+    && message.content.some(block => block.type === 'text' && block.text.includes('current turn'))))
+  assert.ok(after.length < before, 'the surface shrank to the fresh window')
 })
 

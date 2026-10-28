@@ -31,6 +31,7 @@ import {
   searchArchive,
 } from './src/history.js'
 import { describeStatus, resolveRolloverBudget } from './src/budget.js'
+import { noteSavedThisWindow, selectRolloverRange } from './src/window.js'
 import { GUIDANCE_SECTION_NAME, GUIDANCE_SECTION_ORDER, GUIDANCE_TEXT } from './src/guidance.js'
 
 /** Bytes of framing the checkpoint wrapper adds around the note. */
@@ -89,9 +90,9 @@ function toPins(raw, config) {
     const line = entry.replace(/\s+/gu, ' ').trim().slice(0, config.pinnedLineMaxChars)
     if (line.length === 0 || seen.has(line)) continue
     const size = Buffer.byteLength(line, 'utf8') + 3
-    if (used + size > config.pinnedMaxBytes) {
+    if (used + size > config.handoffMaxBytes) {
       throw new Error(
-        `sticky_note: the pinned list exceeds the ${config.pinnedMaxBytes}-byte budget after `
+        `sticky_note: the pinned list exceeds the ${config.handoffMaxBytes}-byte handoff budget after `
         + `${pins.length} ${pins.length === 1 ? 'entry' : 'entries'}; consolidate it and call again`,
       )
     }
@@ -166,19 +167,20 @@ function currentPins(session) {
 
 /** Model-facing contract of the pin tool. */
 const PIN_TOOL_DESCRIPTION =
-  'Pin durable facts that must survive context eviction, and read them back. This session keeps a '
-  + 'sliding context window: older messages are replaced by a sticky note that carries the pinned list '
-  + 'forward verbatim, while the recent window stays intact. Call `update` once a decision, constraint, '
-  + 'or open problem must not be lost, and again after it changes. Each `update` replaces the whole '
-  + 'pinned list, so send the complete set you want carried; write terse imperative lines stating what '
-  + 'is decided, what is verified, and what remains. Call `read` to see exactly what is carried now.'
+  'Write or read the handoff note that survives a window change. When this window ends, every message '
+  + 'before the current turn leaves the conversation; the next window starts with the system prompt and '
+  + 'this note only. Anything you leave out is gone from the live context and reachable only through '
+  + '`history_query`. Call `update` as work progresses — each call replaces the whole list, so send the '
+  + 'complete set: the goal and what finishing means, decisions with their reasons, non-obvious '
+  + 'constraints, rejected approaches, open questions, and the exact next action. Write terse imperative '
+  + 'lines, not narrative. Call `read` to see exactly what a fresh window will inherit.'
 
 /** Model-facing contract of the sensing tool. */
 const SENSING_TOOL_DESCRIPTION =
-  'Report how much of this window is left before the session rolls over to a new one. Returns the '
-  + 'tokens used, the rollover line, the tokens remaining, the current window ordinal, and whether the '
-  + 'number comes from provider usage or a local estimate. Call it when you are unsure whether there is '
-  + 'room for one more large step, and to decide whether to pin state now.'
+  'Report how much of this window is left before it ends. Returns the tokens used, the rollover line, '
+  + 'the tokens remaining, the current window ordinal, and whether the number comes from provider usage '
+  + 'or a local estimate. Call it before a large step, and to decide whether the note is current enough '
+  + 'to roll over.'
 
 /** Model-facing contract of the recall tool. */
 const HISTORY_TOOL_DESCRIPTION =
@@ -235,7 +237,7 @@ function createPinTool(config) {
       const session = requireSession(exec, 'sticky_note')
       if (args.action === 'read') {
         const all = currentPins(session)
-        const carried = carriedPins(all, config.pinnedMaxBytes)
+        const carried = carriedPins(all, config.handoffMaxBytes)
         return Promise.resolve({ action: 'read', pins: carried, count: carried.length, total: all.length })
       }
       if (args.pins === undefined) {
@@ -492,6 +494,71 @@ function requireSession(exec, tool) {
   return session
 }
 
+/** Model-facing contract of the rollover tool. */
+const NEW_CONTEXT_TOOL_DESCRIPTION =
+  'Open a new memory window once the handoff note is saved. The fresh window keeps only the system prompt, '
+  + 'your `sticky_note` list, and the work still in flight; every earlier message leaves the conversation '
+  + 'and stays reachable only through `history_query`. Call `sticky_note` first — a rollover with no saved '
+  + 'note is refused, because the note is the only thing that survives it.'
+
+/**
+ * Build the rollover tool bound to the engine that owns the transaction.
+ * @param {object} engine - the compaction engine that performs the rollover.
+ * @returns {object} a tool definition for `ctx.tools.register`.
+ */
+function createNewContextTool(engine) {
+  return defineTool({
+    name: 'new_context',
+    description: NEW_CONTEXT_TOOL_DESCRIPTION,
+    parameters: {
+      reason: { type: 'string', description: 'Optional. Why a new window is appropriate now.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          rolled: { type: 'boolean', required: true },
+          window: { type: 'integer' },
+          evicted: { type: 'integer' },
+          detail: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.detail }],
+    },
+    async execute(args, exec) {
+      const session = requireSession(exec, 'new_context')
+      const gate = noteSavedThisWindow(session)
+      if (!gate.saved) {
+        return {
+          rolled: false,
+          detail: 'No note is saved in this window, so a rollover would leave nothing behind. Call '
+            + '`sticky_note` with action `update` and the complete handoff list, then call `new_context` '
+            + 'again in this same turn.',
+        }
+      }
+      const range = selectRolloverRange(session)
+      if (range === null) {
+        return {
+          rolled: false,
+          detail: 'Nothing is evictable yet: the current turn is the only history in this window.',
+        }
+      }
+      const signal = exec.signal ?? new AbortController().signal
+      const result = await engine.compactRegion(range.start, range.end, exec.agent, signal)
+      return {
+        rolled: true,
+        window: currentWindowNumber(session),
+        evicted: result.shadowedSeqs.length,
+        detail: `Rolled over to window ${currentWindowNumber(session)}: ${result.shadowedSeqs.length} `
+          + `messages left the conversation and now live only in the archive. Continue from the note`
+          + `${typeof args.reason === 'string' && args.reason.length > 0 ? ` (${args.reason})` : ''}.`,
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Open new window', kind: 'other' }),
+  })
+}
+
 /** Byte- or count-valued budget shared by the schema. */
 const COUNT = () => z.number().step(1).min(1)
 
@@ -522,11 +589,8 @@ const CONFIG_SCHEMA = z.object({
   })),
   auto: z.boolean(),
   noteMaxBytes: COUNT(),
-  objectiveMaxBytes: COUNT(),
-  verifiedMaxBytes: COUNT(),
-  openIssueMaxBytes: COUNT(),
-  pinnedMaxBytes: COUNT(),
-  objectiveMessages: COUNT(),
+  handoffMaxBytes: COUNT(),
+  recordedMaxBytes: COUNT(),
   fileListMax: COUNT(),
   commandListMax: COUNT(),
   pinnedLineMaxChars: COUNT(),
@@ -534,9 +598,11 @@ const CONFIG_SCHEMA = z.object({
   historyReadMaxChars: COUNT(),
   historySearchLimit: COUNT(),
   historySnippetChars: COUNT(),
+  derivedAppendix: z.boolean(),
   noteTool: z.boolean(),
   sensingTool: z.boolean(),
   historyTool: z.boolean(),
+  newContextTool: z.boolean(),
   guidance: z.boolean(),
 })
 
@@ -568,6 +634,7 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       policy.noteTool ? createPinTool(policy) : null,
       policy.sensingTool ? createSensingTool(this) : null,
       policy.historyTool ? createHistoryTool(policy) : null,
+      policy.newContextTool ? createNewContextTool(this) : null,
     ].filter(tool => tool !== null)
     if (tools.length > 0) {
       ctx.effect(() => {

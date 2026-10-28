@@ -22,11 +22,14 @@
     - id: compaction-sticky-window
       name: 'dsh-compaction-sticky-window'
       config:
-        # Pressure at 80% of the message budget; the recent 35% of that budget
-        # stays verbatim as the sliding window.
+        # Pressure at 80% of the message budget.
         thresholdRatio: 0.8
-        retainRatio: 0.35
-        # The carried note is replaced wholesale on every rollover.
+        # Keep nothing verbatim: the fresh window is the system prompt, the
+        # model's own note, and the turn in flight. A retained tail would leave
+        # the model reading old messages instead of the note it was told to
+        # write, which is the shape this backend exists to avoid.
+        retainTokens: 0
+        # The note is replaced wholesale on every rollover.
         noteMaxBytes: 6144
 
 # Select this bundle's preset for new sessions on a preset-backed profile.

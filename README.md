@@ -1,8 +1,8 @@
 # dsh-compaction-sticky-window
 
-A DeepSeek Harness profile bundle that replaces the summarizing context compactor with a **carried sticky note plus a verbatim sliding window**, and adds the tools a model needs to work with one.
+A DeepSeek Harness profile bundle that replaces the summarizing context compactor with **a model-written handoff note and a fresh window that keeps almost nothing else**.
 
-The shipped backend (`@deepseek-ai/dsh-compaction-basic`) replaces an old span with a model-written summary: one extra model call per rollover. This backend keeps the same durable transaction but replaces the span with a deterministic note built from the evicted messages themselves, so a rollover costs no tokens and replays identically.
+The shipped backend condenses an old span into a model-written summary: one extra model call per rollover, and a summary whose contents the model did not choose. This backend inverts the ownership. The model writes its own note with `sticky_note`, opens a new window with `new_context`, and that window starts with the system prompt, the note, and the work in flight — nothing else. One deterministic fallback remains for automatic pressure: if no note was written, the evicted messages are reduced to the facts the log can prove.
 
 ## Install
 
@@ -25,51 +25,70 @@ Compaction has two possible owners, and which one a profile uses decides what "i
 
 On a preset-backed profile a host-plane row cannot reach a session: the preset isolates `compaction`, so its own backend serves its own agents. Running only a host row there would leave the summarizing backend in charge. That is why the bundle ships `presets/sticky-window.patch.yml` — the shipped `standard` preset with one group changed — and overrides the preset registry's default to select it.
 
-A person's own choice in Settings still wins over that default. If they switch back to another preset, that preset's backend takes over again, and this bundle's tools report budget for the window they can see rather than the one actually in use.
+A person's own choice in Settings still wins over that default. If they switch back to another preset, that preset's backend takes over again.
 
-The preset's child list is a snapshot. `npm run sync-preset` regenerates it from a local installation after a DSH upgrade; the child list is otherwise frozen at the release this package targets.
+The preset's child list is a snapshot. `npm run sync-preset` regenerates it from a local installation after a DSH upgrade.
 
-## What a rollover does
+## The window lifecycle
 
-1. The compaction transaction selects the span to evict from token pressure, keeping the configured share of the conversation verbatim as the sliding window and never splitting a tool-call/result pair.
-2. `summarize()` — the single hook this backend overrides — builds the note from the evicted messages. No model is called.
-3. The transaction writes the usual `compaction/start`, `compaction/summary`, replacement `user/message`, and `compaction/end` bracket, and enforces that the replacement is smaller than the span it replaces.
+```
+work proceeds ──► context_status: tokens left?
+                        │
+        ┌───────────────┴────────────────┐
+        │ room enough                    │ note is current, room tight
+        ▼                                ▼
+   keep working                 sticky_note update  ──►  new_context
+                                        │                   │
+                                        │           no note saved → refused
+                                        │                   │
+                                        ▼                   ▼
+                              note saved          window ends: every message
+                                                  before the current turn is
+                                                  evicted, becomes archive
+                                                            │
+                                                            ▼
+                              fresh window = system prompt + note + turn in flight
+                                                            │
+                                            detail missing? → history_query
+```
 
-Because the transaction is untouched, `/compact`, automatic pressure, model-switch, and context-overflow recovery all keep working, and the session log stays reconstructable.
+Automatic pressure uses the same replacement without the model asking: the transaction triggers at `thresholdRatio`, evicts everything before the current turn, and renders the note from whatever the model last saved. When nothing was saved, the note says so and carries only the recorded facts — it never invents a handoff.
+
+Because the retained window is empty by default (`retainTokens: 0`), the fresh window is genuinely fresh. Set `retainTokens` or `retainRatio` to keep a verbatim tail instead.
 
 ## The note
 
-Sections are derived from the evicted messages, in this order:
+Two sections, and only the first is the model's:
 
 | Section | Source |
 |---|---|
-| `## Objective` | The most recent user-authored messages, newest first. |
-| `## Verified state` | File paths and commands recovered from tool-call arguments, with the tool names that touched them. |
-| `## Open issues` | Tool results that reported an error. |
-| `## Next action` | The last assistant text in the span. |
-| `## Pinned state` | The model's own pinned list, carried forward verbatim. |
+| `## Handoff` | The model's `sticky_note` list, carried verbatim. Claims its byte budget first. |
+| `## Recorded facts` | Derived from the evicted messages: file paths and commands recovered from tool-call arguments, and tool results that reported an error. Suppressed by `derivedAppendix: false`. |
 
-The note is a normal checkpoint message on the surface, so it is read back on the next rollover exactly like any other evicted content — there is no side storage, and a replayed session rebuilds the identical note.
+The note is a normal checkpoint message on the surface, so the next rollover reads it back like any other evicted content — no side storage, and a replayed session rebuilds the identical note.
+
+Pins are only read from a `sticky_note` result, so a file the agent read cannot inject or erase them. A pin list over budget is refused with an instruction to consolidate, not silently trimmed.
 
 ## The tools
 
-Three tools close the loop the note alone cannot. All three are registered on the host plane, so a preset realm inherits them through the `tools` registry it does not isolate.
-
 | Tool | Answers |
 |---|---|
-| `context_status` | How many tokens are left before the next rollover, the current window ordinal, and whether the number is provider usage or a local estimate. |
-| `sticky_note` | `read` returns the pinned list; `update` replaces it. |
+| `context_status` | Tokens used, the rollover line, tokens remaining, the current window ordinal, and whether the figure is provider usage or a local estimate. |
+| `sticky_note` | `read` returns the handoff a fresh window inherits; `update` replaces it. |
+| `new_context` | Ends the window now. Refused while this window has no saved note. |
 | `history_query` | `windows` lists archived windows, `search` finds a case-sensitive literal and returns item ids, `read` returns one item by id. |
 
-`context_status` prices the same threshold the transaction triggers on: the routed model's context window, minus the request's own output reservation and the configured headroom, capped by `thresholdRatio`. A reported number that disagreed with the trigger would be worse than no number, so `src/budget.js` mirrors that arithmetic and is tested against it.
+All four are registered on the host plane; a preset realm inherits them through the `tools` registry it does not isolate.
 
-`sticky_note` persists by leaving its result in the conversation. The newest pin block in the log is authoritative, which means pins survive fork, resume, and replay without side storage or a session-format change.
+`context_status` prices the same threshold the transaction triggers on, and reports the trigger's own refusals (`available: false` with the reason) rather than a plausible number that would never fire. `src/budget.js` mirrors that arithmetic and is tested against it.
 
-`history_query` reads the archive the log already holds: each `compaction/summary` event records the seqs it replaced, and those events stay at their original seqs forever. Windows and items are named the way the reference implementations name them — `w<window>:<ordinal>`.
+`new_context` performs the rollover inside the tool call, bounded strictly before the current turn, so the turn's own tool results still have a surface to land on. The write-ahead gate is the reference behavior: no note, no new window.
+
+`history_query` reads the archive the log already holds: each `compaction/summary` event records the seqs it replaced, and those events keep their seqs forever. Windows and items are named `w<window>:<ordinal>`.
 
 ## The prompt protocol
 
-A sliding window only works if the model cooperates with it. The bundle registers one `systemPrompt` section (order 9000) stating that the machinery is private, when to check the budget, what a note must contain to be worth carrying, and how to recover a detail the note dropped. It is written for the model, names only tools the model can call, and is registered with `interpolate: false` so its braces stay literal.
+The bundle registers one `systemPrompt` section (order 9000) that states what a window is, that everything not written into the note disappears from the live context, when to check the budget, what a handoff must contain, that `new_context` needs a saved note, and how to recover a detail afterwards. It is registered with `interpolate: false` so its braces stay literal.
 
 The reference implementations make the same move — Axon keeps a `<memory_window_protocol>` block in its stable prefix.
 
@@ -79,37 +98,37 @@ Every key is optional. Unknown keys fail at load instead of being ignored.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `thresholdRatio` | `0.8` | Share of the message budget that triggers a rollover. |
-| `retainRatio` | `0.35` | Share kept verbatim as the sliding window. |
-| `retainTokens` | — | Absolute retained-window size; mutually exclusive with `retainRatio`. |
+| `thresholdRatio` | `0.8` | Share of the message budget that triggers an automatic rollover. |
+| `retainTokens` | `0` | Verbatim tail kept after a rollover. `0` keeps only the turn in flight. |
+| `retainRatio` | — | Fractional form of `retainTokens`; mutually exclusive with it. |
 | `headroomTokens` | shipped default | Reserve subtracted from the context window before pressure is measured. |
 | `maxTokens` | shipped default | Generation cap used when pricing the request. |
 | `compactionRetries` | shipped default | Retries when one rollover does not fall below the threshold. |
 | `maxOverflowRetries` | shipped default | Retries after a provider-confirmed context overflow. |
 | `modelPolicies` | `[]` | Per-provider/model overrides of the fields above. |
 | `auto` | `true` | Whether automatic pressure and overflow listeners are registered. |
-| `noteMaxBytes` | `6144` | UTF-8 budget for the note. |
-| `objectiveMaxBytes` | `1024` | Budget for the objective section. |
-| `verifiedMaxBytes` | `2560` | Budget for the verified-state section. |
-| `openIssueMaxBytes` | `1024` | Budget for the open-issues section. |
-| `pinnedMaxBytes` | `2048` | Budget for the pinned section. |
-| `objectiveMessages` | `3` | Trailing user messages considered for the objective. |
-| `fileListMax` | `24` | Distinct file paths reported. |
-| `commandListMax` | `12` | Distinct commands reported. |
+| `noteMaxBytes` | `6144` | UTF-8 budget for the whole note. |
+| `handoffMaxBytes` | `4096` | Budget for `## Handoff`; claimed before anything else. |
+| `recordedMaxBytes` | `2048` | Budget for `## Recorded facts`. |
+| `derivedAppendix` | `true` | Include the recorded-facts section. |
+| `fileListMax` | `24` | Distinct file paths in the appendix. |
+| `commandListMax` | `12` | Distinct commands in the appendix. |
 | `pinnedLineMaxChars` | `400` | Per-line character cap for a pinned fact. |
-| `warningTokens` | `6144` | Remaining budget at which `context_status` advises pinning now. |
+| `warningTokens` | `6144` | Remaining budget at which `context_status` advises writing the note now. |
 | `historyReadMaxChars` | `4000` | Characters returned by one archive read. |
 | `historySearchLimit` | `5` | Hits returned by one archive search. |
 | `historySnippetChars` | `400` | Context characters shown around a hit. |
 | `noteTool` | `true` | Register `sticky_note`. |
 | `sensingTool` | `true` | Register `context_status`. |
 | `historyTool` | `true` | Register `history_query`. |
+| `newContextTool` | `true` | Register `new_context`. |
 | `guidance` | `true` | Register the prompt protocol section. |
 
 The note budget is additionally trimmed to half of the span it replaces, so a small span shrinks the note instead of failing the transaction's shrink check. A span too small to hold even the note's framing still fails loudly, exactly as the shipped backend does with a summary that cannot fit.
 
 ## Why this shape
 
+- **The model owns the handoff.** A summary the model did not write is a guess about what matters. The reference implementations hand that decision to the model and give it a gate that makes writing it obligatory before a rollover it requests.
 - **No side storage.** The note, the pins, and the archive index are ordinary surface content or existing log events, so fork, resume, and replay need no extra persistence and no format version.
 - **No new session events.** The mechanism rides the existing `compaction/*` vocabulary.
 - **No dependence on internal APIs.** The backend extends the published `BasicCompactionEngine` and overrides the documented `summarize()` hook; everything else is the shipped transaction.
@@ -121,13 +140,13 @@ node --test test/note.test.mjs test/engine.integration.mjs
 node scripts/sync-preset.mjs
 ```
 
-`test/engine.integration.mjs` drives real rollovers through the shipped compaction transaction with a hand-built Cordis Context, so it fails if the note ever stops landing where a summary used to, or if the archive stops answering.
+`test/engine.integration.mjs` drives real rollovers through the shipped compaction transaction with a hand-built Cordis Context, and asserts the fresh window really is the note plus the current turn.
 
 `node_modules/.` holds a local junction to a DSH installation for module resolution in development and is not published.
 
 ## Known limitations
 
-- The note records structure, not prose: it cannot paraphrase reasoning it never saw written down. Use `sticky_note` for anything a reader could not recover from paths, commands, errors, and the last request and reply.
-- A single indivisible message larger than the window cannot be repaired by a window slide; the optional tool-result pruner still runs before selection.
+- The model can still under-write. When it does, the note carries only the recorded facts and says no handoff was written; it never fabricates one.
+- A single indivisible message larger than the window cannot be repaired by a rollover; the optional tool-result pruner still runs before selection.
 - The shipped preset is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version.
 - Switching a session back to a preset that mounts the summarizing backend re-enables it for that session. Removing the bundle restores the shipped behavior everywhere.

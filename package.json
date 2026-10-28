@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-sticky-window",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Sticky-note plus sliding-window context handling for DeepSeek Harness: retires the model-written summary and replaces it with a deterministic carried note in front of a verbatim recent window",
   "type": "module",
   "main": "index.js",
@@ -47,3 +47,4 @@
     }
   }
 }
+

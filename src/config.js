@@ -1,11 +1,11 @@
 /**
  * Configuration for the sticky-window compaction backend.
  *
- * Three disjoint groups share one config object: window lifecycle fields the
- * compaction transaction already understands, note fields that decide what the
- * carried sticky note contains, and tool fields that decide what the model can
- * ask about its own context. Lifecycle fields are forwarded untouched so this
- * backend inherits the shipped pressure policy; the rest are resolved here.
+ * Three groups share one config object: window lifecycle fields the compaction
+ * transaction already understands, note fields that decide what the carried
+ * note contains, and tool fields that decide what the model can ask about its
+ * own context. Lifecycle fields are forwarded untouched so this backend
+ * inherits the shipped pressure policy; the rest are resolved here.
  *
  * @module dsh-compaction-sticky-window/config
  */
@@ -30,19 +30,13 @@ export const LIFECYCLE_KEYS = [
 
 /** Default carried-note budget in UTF-8 bytes. */
 const DEFAULT_NOTE_MAX_BYTES = 6144
-/** Default budget for the objective section. */
-const DEFAULT_OBJECTIVE_MAX_BYTES = 1024
-/** Default budget for the verified-state section, which also holds paths. */
-const DEFAULT_VERIFIED_MAX_BYTES = 2560
-/** Default budget for the open-issues section. */
-const DEFAULT_OPEN_ISSUE_MAX_BYTES = 1024
-/** Default budget for the pinned-state section. */
-const DEFAULT_PINNED_MAX_BYTES = 2048
-/** Default number of trailing user messages considered for the objective. */
-const DEFAULT_OBJECTIVE_MESSAGES = 3
-/** Default cap on distinct file paths reported. */
+/** Default budget for the model-authored handoff, which claims its space first. */
+const DEFAULT_HANDOFF_MAX_BYTES = 4096
+/** Default budget for the derived factual appendix. */
+const DEFAULT_RECORDED_MAX_BYTES = 2048
+/** Default cap on distinct file paths reported in the appendix. */
 const DEFAULT_FILE_LIST_MAX = 24
-/** Default cap on distinct commands reported. */
+/** Default cap on distinct commands reported in the appendix. */
 const DEFAULT_COMMAND_LIST_MAX = 12
 /** Default per-line character cap for a pinned fact. */
 const DEFAULT_PINNED_LINE_MAX_CHARS = 400
@@ -62,17 +56,16 @@ const DEFAULT_HISTORY_SNIPPET_CHARS = 400
  */
 export const EXTRA_KEYS = [
   'noteMaxBytes',
-  'objectiveMaxBytes',
-  'verifiedMaxBytes',
-  'openIssueMaxBytes',
-  'pinnedMaxBytes',
-  'objectiveMessages',
+  'handoffMaxBytes',
+  'recordedMaxBytes',
   'fileListMax',
   'commandListMax',
   'pinnedLineMaxChars',
+  'derivedAppendix',
   'noteTool',
   'sensingTool',
   'historyTool',
+  'newContextTool',
   'guidance',
   'warningTokens',
   'historyReadMaxChars',
@@ -94,9 +87,11 @@ export class ResolvedConfig {
 /**
  * Build the lifecycle-only object the compaction transaction validates.
  *
- * Unset keys stay unset so the shipped defaults keep applying; passing an
- * explicit `undefined` would not change behavior but would obscure where a
- * value came from.
+ * Unset keys stay unset so the shipped defaults keep applying, with one
+ * deliberate exception: when the deployment states no retention, this backend
+ * retains almost nothing. Keeping a large verbatim tail would leave the model
+ * reading old messages instead of the note it was told to write, which defeats
+ * the shape the model is instructed to work with.
  * @param {Record<string, unknown>} config - raw plugin config.
  * @returns {Record<string, unknown>} the keys the transaction owns.
  */
@@ -105,6 +100,9 @@ export function toLifecycleConfig(config) {
   const out = {}
   for (const key of LIFECYCLE_KEYS) {
     if (config[key] !== undefined) out[key] = config[key]
+  }
+  if (out.retainRatio === undefined && out.retainTokens === undefined) {
+    out.retainTokens = 0
   }
   return out
 }
@@ -126,11 +124,8 @@ export function resolveConfig(config) {
   }
   return new ResolvedConfig({
     noteMaxBytes: positiveInteger('noteMaxBytes', config.noteMaxBytes, DEFAULT_NOTE_MAX_BYTES),
-    objectiveMaxBytes: positiveInteger('objectiveMaxBytes', config.objectiveMaxBytes, DEFAULT_OBJECTIVE_MAX_BYTES),
-    verifiedMaxBytes: positiveInteger('verifiedMaxBytes', config.verifiedMaxBytes, DEFAULT_VERIFIED_MAX_BYTES),
-    openIssueMaxBytes: positiveInteger('openIssueMaxBytes', config.openIssueMaxBytes, DEFAULT_OPEN_ISSUE_MAX_BYTES),
-    pinnedMaxBytes: positiveInteger('pinnedMaxBytes', config.pinnedMaxBytes, DEFAULT_PINNED_MAX_BYTES),
-    objectiveMessages: positiveInteger('objectiveMessages', config.objectiveMessages, DEFAULT_OBJECTIVE_MESSAGES),
+    handoffMaxBytes: positiveInteger('handoffMaxBytes', config.handoffMaxBytes, DEFAULT_HANDOFF_MAX_BYTES),
+    recordedMaxBytes: positiveInteger('recordedMaxBytes', config.recordedMaxBytes, DEFAULT_RECORDED_MAX_BYTES),
     fileListMax: positiveInteger('fileListMax', config.fileListMax, DEFAULT_FILE_LIST_MAX),
     commandListMax: positiveInteger('commandListMax', config.commandListMax, DEFAULT_COMMAND_LIST_MAX),
     pinnedLineMaxChars: positiveInteger('pinnedLineMaxChars', config.pinnedLineMaxChars, DEFAULT_PINNED_LINE_MAX_CHARS),
@@ -138,9 +133,11 @@ export function resolveConfig(config) {
     historyReadMaxChars: positiveInteger('historyReadMaxChars', config.historyReadMaxChars, DEFAULT_HISTORY_READ_MAX_CHARS),
     historySearchLimit: positiveInteger('historySearchLimit', config.historySearchLimit, DEFAULT_HISTORY_SEARCH_LIMIT),
     historySnippetChars: positiveInteger('historySnippetChars', config.historySnippetChars, DEFAULT_HISTORY_SNIPPET_CHARS),
+    derivedAppendix: booleanValue('derivedAppendix', config.derivedAppendix),
     noteTool: booleanValue('noteTool', config.noteTool),
     sensingTool: booleanValue('sensingTool', config.sensingTool),
     historyTool: booleanValue('historyTool', config.historyTool),
+    newContextTool: booleanValue('newContextTool', config.newContextTool),
     guidance: booleanValue('guidance', config.guidance),
   })
 }

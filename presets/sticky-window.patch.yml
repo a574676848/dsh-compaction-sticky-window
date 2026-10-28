@@ -82,11 +82,12 @@
                 name: 'dsh-compaction-sticky-window'
                 config:
                   thresholdRatio: 0.8
-                  retainRatio: 0.35
+                  retainTokens: 0
                   noteMaxBytes: 6144
                   noteTool: false
                   sensingTool: false
                   historyTool: false
+                  newContextTool: false
                   guidance: false
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
