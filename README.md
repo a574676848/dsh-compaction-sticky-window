@@ -54,6 +54,75 @@ work proceeds ──► context_status: tokens left?
                                             detail missing? → history_query
 ```
 
+### Sequence: the model opens a window
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant M as Model
+    participant S as context_status
+    participant N as sticky_note
+    participant X as Compaction transaction
+    participant H as history_query
+
+    U->>M: task
+    M->>S: how much room is left?
+    S-->>M: used, rollover line, remaining, window ordinal
+
+    Note over M: a push notice arrives in the warning band,<br/>so the model learns the budget without asking
+
+    M->>N: update(the complete handoff)
+    N-->>M: pinned lines, written to the session log
+    M->>X: new_context
+
+    alt no note saved in this window
+        X-->>M: refused — write the note first
+    else note saved
+        X->>X: evict every message before the current turn
+        X->>X: render the note and replace the span
+        X-->>M: window N+1, M messages archived
+    end
+
+    Note over M,X: the fresh window is the system prompt,<br/>the note, and the turn in flight — nothing else
+
+    M->>N: read
+    N-->>M: the handoff a fresh window inherits
+    M->>H: search("an exact literal")
+    H-->>M: item ids and snippets
+    M->>H: read(id)
+    H-->>M: the evicted message
+    M->>U: continue the work
+```
+
+### Sequence: automatic pressure
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as Turn loop
+    participant X as Compaction engine
+    participant M as Model
+
+    T->>X: pre-step
+    X->>X: measure against the rollover line
+
+    alt used < line − warnTokens
+        X-->>T: nothing (no notice, no log scan)
+    else inside the warning band
+        X-->>M: warning notice (once per window)
+        Note over X: still no rollover
+    else past the line, no saved note
+        X-->>M: exhausted, then blocked notice (each once)
+        Note over X: postponed into the fallback band —<br/>history is never evicted unprepared
+    else past the line, note saved
+        X->>X: roll over now
+        X-->>M: fresh window: prompt + note + turn in flight
+    end
+
+    Note over X: only a provider-confirmed overflow<br/>forces a window that has no note
+```
+
 Automatic pressure is a three-stage ramp, not a cliff:
 
 | Stage | At | What happens |

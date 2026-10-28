@@ -51,6 +51,75 @@ preset 的子列表是一份快照。DSH 升级后运行 `npm run sync-preset`�
                                             缺细节？ → history_query
 ```
 
+### 时序：模型主动开新窗口
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant M as 模型
+    participant S as context_status
+    participant N as sticky_note
+    participant X as 压缩事务
+    participant H as history_query
+
+    U->>M: 任务
+    M->>S: 还剩多少空间？
+    S-->>M: 已用、换窗线、剩余、窗口序号
+
+    Note over M: 进入预警区间时会主动推送提醒，<br/>模型不必自己想起来查
+
+    M->>N: update（完整的交接内容）
+    N-->>M: 钉住的行，写入会话日志
+    M->>X: new_context
+
+    alt 本窗口没有已保存的便签
+        X-->>M: 拒绝——先写便签
+    else 便签已保存
+        X->>X: 淘汰当前 turn 之前的每条消息
+        X->>X: 生成便签并替换该区间
+        X-->>M: 窗口 N+1，M 条消息已归档
+    end
+
+    Note over M,X: 新窗口只有系统提示、<br/>便签、以及进行中的本 turn——没有别的
+
+    M->>N: read
+    N-->>M: 新窗口将继承的交接
+    M->>H: search("某个精确字面量")
+    H-->>M: 条目 id 与片段
+    M->>H: read(id)
+    H-->>M: 被淘汰的那条消息
+    M->>U: 继续任务
+```
+
+### 时序：自动压力触发
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T as Turn 循环
+    participant X as 压缩引擎
+    participant M as 模型
+
+    T->>X: pre-step
+    X->>X: 与换窗线比对
+
+    alt 已用 < 换窗线 − warnTokens
+        X-->>T: 什么都不做（不提醒、不扫日志）
+    else 处于预警区间
+        X-->>M: warning 提醒（每窗口一次）
+        Note over X: 仍然不换窗
+    else 越过换窗线，但没有便签
+        X-->>M: exhausted，随后 blocked 提醒（各一次）
+        Note over X: 推迟到 fallback 区间——<br/>绝不在没有准备的情况下淘汰历史
+    else 越过换窗线，便签已保存
+        X->>X: 立刻换窗
+        X-->>M: 新窗口：系统提示 + 便签 + 进行中的本 turn
+    end
+
+    Note over X: 只有 Provider 确认溢出，<br/>才会强制结束一个没有便签的窗口
+```
+
 自动压力是三级坡度，不是悬崖：
 
 | 阶段 | 触发点 | 发生什么 |
