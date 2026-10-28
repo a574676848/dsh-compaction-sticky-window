@@ -25,6 +25,18 @@
       },
       "versions": [
         {
+          "version": "0.6.2",
+          "publishTimestamp": 1793156536,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/a574676848/dsh-compaction-sticky-window",
+            "commit": "bb96184b169e9d15a9ce6d56c136f949f5c81d65"
+          },
+          "engines": {
+            "dsh": ">=0.2.0-rc.2 <0.3.0"
+          }
+        },
+        {
           "version": "0.6.1",
           "publishTimestamp": 1793156166,
           "source": {
