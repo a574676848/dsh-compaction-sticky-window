@@ -21,6 +21,7 @@
 import z from '@deepseek-ai/schemastery'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { resolveConfig, toLifecycleConfig } from './src/config.js'
 import { PINS_CLOSE, PINS_OPEN, PIN_TOOL_NAME, buildStickyNote, extractPins, textOf } from './src/note.js'
 import {
@@ -30,8 +31,14 @@ import {
   readArchivedItem,
   searchArchive,
 } from './src/history.js'
-import { describeStatus, resolveRolloverBudget } from './src/budget.js'
+import { describeStatus, resolveRolloverBudget, rolloverCeiling } from './src/budget.js'
 import { noteSavedThisWindow, selectRolloverRange } from './src/window.js'
+import {
+  NOTICE_SOURCE_KIND,
+  blockedNotice,
+  exhaustedNotice,
+  warningNotice,
+} from './src/notice.js'
 import { GUIDANCE_SECTION_NAME, GUIDANCE_SECTION_ORDER, GUIDANCE_TEXT } from './src/guidance.js'
 
 /** Bytes of framing the checkpoint wrapper adds around the note. */
@@ -621,6 +628,9 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
   /** Complete plugin config schema. */
   static Config = CONFIG_SCHEMA
 
+  /** Per-session budget notices already delivered in the current window. */
+  #notices = new WeakMap()
+
   /**
    * @param {import('@deepseek-ai/cordis').Context} ctx - plugin context.
    * @param {Record<string, unknown>} [config] - raw plugin config.
@@ -655,6 +665,135 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
         }))
       }
     }
+    this.#registerNotices()
+  }
+
+  /**
+   * Decide whether an automatic rollover happens now.
+   *
+   * A prepared model gets its window changed as soon as the pressure line is
+   * crossed. An unprepared one does not: the rollover is postponed into the
+   * fallback band while notices ask for the note, because evicting history the
+   * model never wrote down is the one failure this backend exists to prevent.
+   * A provider-confirmed overflow is the exception — there the window must end,
+   * and the note says plainly that none was written.
+   * @param {object} agent - agent whose session is measured.
+   * @param {'pressure' | 'context-overflow'} trigger - why the transaction is considering a rollover.
+   * @param {AbortSignal} signal - live turn cancellation signal.
+   * @returns {Promise<object | null>} the rollover result, or null when none ran.
+   */
+  async compactIfNeeded(agent, trigger, signal) {
+    if (trigger === 'context-overflow') return this.#rollover(agent, signal)
+    const budget = await this.#budgetFor(agent.session, signal)
+    if (budget === undefined) return null
+    const used = this.ctx.tokenMeter.measure(agent.session).totalTokens
+    if (used < budget.thresholdTokens) return null
+    if (!noteSavedThisWindow(agent.session).saved) return null
+    return this.#rollover(agent, signal)
+  }
+
+  /**
+   * Resolve the routed target's rollover line and capacity.
+   * @param {object} session - session whose latest request is measured.
+   * @param {AbortSignal} signal - cancellation for the model-info lookup.
+   * @returns {Promise<object | undefined>} the budget, or undefined when it cannot be resolved.
+   */
+  async #budgetFor(session, signal) {
+    const header = session.requestHeader()
+    if (header === undefined) return undefined
+    const { provider, model, maxTokens } = header.config
+    if (provider.length === 0 || model.length === 0) return undefined
+    let info
+    try {
+      info = await this.ctx.llm.resolveModelInfo(provider, model, signal)
+    } catch (error) {
+      signal.throwIfAborted()
+      return undefined
+    }
+    const contextWindow = info.context?.contextWindow
+    if (typeof contextWindow !== 'number' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
+      return undefined
+    }
+    const reserved = maxTokens ?? info.defaultMaxTokens ?? 0
+    const budget = resolveRolloverBudget(this.config, { provider, model }, contextWindow, reserved)
+    if (budget.problem !== undefined) return undefined
+    return { ...budget, contextWindow, reserved }
+  }
+
+  /**
+   * Evict everything before the current turn and replace it with the note.
+   * @param {object} agent - agent owning the session.
+   * @param {AbortSignal} signal - cancellation signal.
+   * @returns {Promise<object | null>} the result, or null when nothing is evictable.
+   */
+  async #rollover(agent, signal) {
+    this.ctx.get('toolResultPruner')?.pruneSession(agent.session)
+    const range = selectRolloverRange(agent.session)
+    if (range === null) return null
+    return this.compactRegion(range.start, range.end, agent, signal)
+  }
+
+  /**
+   * Announce the budget while the model can still act on it.
+   *
+   * Registered ahead of the pressure listener so the notice reflects the window
+   * the step is about to run in, and dropped when that listener rolled over
+   * first.
+   */
+  #registerNotices() {
+    if (!this.policy.notices) return
+    this.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      const notice = await this.#noticeFor(agent)
+      const before = currentWindowNumber(agent.session)
+      const decision = await next()
+      if (decision.kind === 'reject' || signal.aborted) return decision
+      if (notice === undefined || currentWindowNumber(agent.session) !== before) return decision
+      const message = createUserMessage({
+        content: [{ type: 'text', text: notice.text }],
+        source: { kind: NOTICE_SOURCE_KIND, form: 'notice', summary: notice.summary },
+      })
+      return { ...decision, messages: [message, ...decision.messages] }
+    }, { prepend: true })
+  }
+
+  /**
+   * Choose the notice this step deserves, at most once per window per stage.
+   * @param {object} agent - agent whose session is measured.
+   * @returns {Promise<{ text: string, summary: string } | undefined>} the notice to inject.
+   */
+  async #noticeFor(agent) {
+    const session = agent.session
+    const budget = await this.#budgetFor(session, new AbortController().signal)
+    if (budget === undefined) return undefined
+    const used = this.ctx.tokenMeter.measure(session).totalTokens
+    const ceiling = rolloverCeiling(budget, this.policy.fallbackTokens, budget.contextWindow, budget.reserved)
+    const window = currentWindowNumber(session)
+    const previous = this.#notices.get(session)
+    const state = previous !== undefined && previous.window === window
+      ? previous
+      : { window, sent: new Set() }
+    this.#notices.set(session, state)
+    /**
+     * Emit one stage at most once per window.
+     * @param {string} stage - stage key.
+     * @param {() => object} build - notice builder.
+     * @returns {object | undefined} the notice when this stage is new.
+     */
+    const once = (stage, build) => {
+      if (state.sent.has(stage)) return undefined
+      state.sent.add(stage)
+      return build()
+    }
+    if (used >= ceiling) {
+      return noteSavedThisWindow(session).saved ? undefined : once('blocked', blockedNotice)
+    }
+    if (used >= budget.thresholdTokens) {
+      return once('exhausted', () => exhaustedNotice(ceiling - used))
+    }
+    if (budget.thresholdTokens - used <= this.policy.warnTokens) {
+      return once('warn', () => warningNotice(budget.thresholdTokens - used))
+    }
+    return undefined
   }
 
   /**
@@ -671,7 +810,14 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
   async summarize(input, agent, signal) {
     signal?.throwIfAborted()
     const budget = spanNoteBudget(input.messages, this.policy)
-    const { text } = buildStickyNote(input.messages, { ...this.policy, noteMaxBytes: budget })
+    // Read the handoff from the whole session: a note written in the turn that
+    // triggered this rollover sits outside the evicted span.
+    const handoff = currentPins(agent.session)
+    const { text } = buildStickyNote(
+      input.messages,
+      { ...this.policy, noteMaxBytes: budget },
+      { handoff },
+    )
     return {
       summary: [{ type: 'text', text }],
       provider: 'dsh-compaction-sticky-window',

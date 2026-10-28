@@ -321,12 +321,21 @@ function renderNote(facts, config) {
 
 /**
  * Build the note that replaces one evicted span.
+ *
+ * The handoff is read from the whole session, not from the evicted messages:
+ * a model that writes its note and then rolls over in the same turn would
+ * otherwise lose it, because that turn is exactly what a rollover keeps. The
+ * evicted span still supplies the note when the caller has nothing newer.
  * @param {readonly object[]} messages - the evicted messages, in surface order.
  * @param {import('./config.js').ResolvedConfig} config - resolved policy.
+ * @param {{ handoff?: readonly string[] }} [overrides] - the newest handoff known outside the span.
  * @returns {{ text: string, window: number, evicted: number }} the rendered note and its facts.
  */
-export function buildStickyNote(messages, config) {
+export function buildStickyNote(messages, config, overrides = {}) {
   const evicted = messages.filter(message => message.role !== 'system').length
   const facts = collectFacts(messages, config)
-  return { text: renderNote({ ...facts, evicted }, config), window: facts.window, evicted }
+  const handoff = overrides.handoff !== undefined && overrides.handoff.length > 0
+    ? overrides.handoff
+    : facts.handoff
+  return { text: renderNote({ ...facts, handoff, evicted }, config), window: facts.window, evicted }
 }

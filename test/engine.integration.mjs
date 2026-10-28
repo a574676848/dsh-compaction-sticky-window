@@ -351,3 +351,74 @@ test('new_context rolls over to a fresh window that keeps only the note and the 
   assert.ok(after.length < before, 'the surface shrank to the fresh window')
 })
 
+/**
+ * Build a session whose rollover line sits a fixed distance from its own usage.
+ * @param {object} meter - token meter double over the session.
+ * @param {number} thresholdOffset - tokens between current usage and the line; negative crosses it.
+ * @returns {{ ctx: Context, engine: object, session: Session, used: number }} the harness.
+ */
+function harnessAtThreshold(meter, thresholdOffset) {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', meter)
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const session = buildSession(6)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+  const used = meter.measure(session).totalTokens
+  const contextWindow = Math.ceil((used + thresholdOffset) / 0.8)
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow }, defaultMaxTokens: 0 }),
+  })
+  const engine = new StickyWindowCompactionEngine(ctx, {
+    auto: false,
+    headroomTokens: 0,
+    maxTokens: 1,
+    warnTokens: 2000,
+  })
+  return { ctx, engine, session, used }
+}
+
+test('an automatic rollover waits until the handoff note is saved', async () => {
+  const meter = createMeter()
+  // The line sits below current usage, so only the note gate stands in the way.
+  const { engine, session } = harnessAtThreshold(meter, -200)
+  openSecondTurn(session)
+  const signal = new AbortController().signal
+
+  const unprepared = await engine.compactIfNeeded({ session, options: {} }, 'pressure', signal)
+  assert.equal(unprepared, null, 'no note means no rollover')
+  assert.equal(session.snapshotEvents().filter(event => event.type === 'compaction/summary').length, 0)
+
+  appendPin(session, 2, ['Ready to hand off'])
+  const prepared = await engine.compactIfNeeded({ session, options: {} }, 'pressure', signal)
+  assert.ok(prepared !== null, 'a saved note lets the rollover happen')
+  assert.match(JSON.stringify(prepared.summary), /Ready to hand off/u)
+})
+
+test('a warning is pushed before the rollover line and only once', async () => {
+  const meter = createMeter()
+  // The line sits 500 tokens above usage, inside the 2000-token warning band.
+  const { ctx, session } = harnessAtThreshold(meter, 500)
+  const payload = {
+    agent: { session, options: {} },
+    messages: [],
+    turn: 1,
+    step: 2,
+    signal: new AbortController().signal,
+    modelSelection: { provider: 'mock', model: 'mock' },
+  }
+  const fallback = () => Promise.resolve({ kind: 'enter', messages: [] })
+
+  const first = await ctx.waterfall('agent/pre-step', payload, fallback)
+  assert.equal(first.messages.length, 1, 'one notice is injected')
+  const text = first.messages[0].content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+  assert.match(text, /tokens remain before this window ends/u)
+
+  const second = await ctx.waterfall('agent/pre-step', payload, fallback)
+  assert.equal(second.messages.length, 0, 'the same stage is not repeated')
+})
+

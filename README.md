@@ -52,7 +52,15 @@ work proceeds ──► context_status: tokens left?
                                             detail missing? → history_query
 ```
 
-Automatic pressure uses the same replacement without the model asking: the transaction triggers at `thresholdRatio`, evicts everything before the current turn, and renders the note from whatever the model last saved. When nothing was saved, the note says so and carries only the recorded facts — it never invents a handoff.
+Automatic pressure is a three-stage ramp, not a cliff:
+
+| Stage | At | What happens |
+|---|---|---|
+| warning | `threshold − warnTokens` | A notice asks for the note while there is still room to write it. |
+| exhausted | `threshold` | A second notice says the window's budget is spent and the next action is `sticky_note` then `new_context`. A rollover happens here **only if a note is saved**. |
+| blocked | `ceiling = min(threshold + fallbackTokens, capacity)` | With no saved note the window still does not end; the notice now says writing the note is the only action that matters. |
+
+Each notice fires at most once per window. The rollover itself is postponed — never forced — while the note is missing, because evicting history the model never wrote down is the failure this backend exists to prevent. The single exception is a provider-confirmed context overflow, where the window must end: the note then says plainly that none was written and carries only the recorded facts.
 
 Because the retained window is empty by default (`retainTokens: 0`), the fresh window is genuinely fresh. Set `retainTokens` or `retainRatio` to keep a verbatim tail instead.
 
@@ -115,6 +123,9 @@ Every key is optional. Unknown keys fail at load instead of being ignored.
 | `commandListMax` | `12` | Distinct commands in the appendix. |
 | `pinnedLineMaxChars` | `400` | Per-line character cap for a pinned fact. |
 | `warningTokens` | `6144` | Remaining budget at which `context_status` advises writing the note now. |
+| `warnTokens` | `6144` | Distance before the rollover line at which the session pushes its first notice. |
+| `fallbackTokens` | `16384` | Slack past the line during which a rollover waits for the note. |
+| `notices` | `true` | Push budget notices into the model's context. |
 | `historyReadMaxChars` | `4000` | Characters returned by one archive read. |
 | `historySearchLimit` | `5` | Hits returned by one archive search. |
 | `historySnippetChars` | `400` | Context characters shown around a hit. |
@@ -147,6 +158,9 @@ node scripts/sync-preset.mjs
 ## Known limitations
 
 - The model can still under-write. When it does, the note carries only the recorded facts and says no handoff was written; it never fabricates one.
+- If the model never writes a note, the window holds out until a provider-confirmed overflow forces it. That is deliberate — an unprepared rollover loses state — but it means a model that ignores every notice reaches the hard failure instead of a quiet one.
+- The note's handoff is read from the whole session, so a note written in the turn that triggers a rollover is still carried.
 - A single indivisible message larger than the window cannot be repaired by a rollover; the optional tool-result pruner still runs before selection.
 - The shipped preset is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version.
 - Switching a session back to a preset that mounts the summarizing backend re-enables it for that session. Removing the bundle restores the shipped behavior everywhere.
+- Push notices are appended as ordinary `user/message` events with the `sticky-window-notice` source kind. The session format admits extension source kinds, so a log stays readable after the plugin is removed, but an older reader will not know that kind by name.

@@ -87,6 +87,22 @@ export function resolveRolloverBudget(config, target, contextWindow, reservedCom
 }
 
 /**
+ * The token count at which the window ends regardless of a saved note.
+ *
+ * The reference implementation postpones an unprepared rollover by a fixed
+ * buffer and then stops offering slack, capping the ceiling at the model's real
+ * capacity so the postponement can never push past it.
+ * @param {{ thresholdTokens: number }} budget - resolved rollover line.
+ * @param {number} fallbackTokens - slack allowed past the line.
+ * @param {number} contextWindow - the target's context capacity.
+ * @param {number} reservedCompletionTokens - output tokens the request reserves.
+ * @returns {number} the token count at which the window must end.
+ */
+export function rolloverCeiling(budget, fallbackTokens, contextWindow, reservedCompletionTokens) {
+  return Math.min(budget.thresholdTokens + fallbackTokens, contextWindow - reservedCompletionTokens)
+}
+
+/**
  * Describe how much room the session has left before its next rollover.
  * @param {object} options - measured facts.
  * @param {number} options.usedTokens - current request pressure from the token meter.

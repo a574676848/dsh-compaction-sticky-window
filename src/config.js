@@ -42,6 +42,10 @@ const DEFAULT_COMMAND_LIST_MAX = 12
 const DEFAULT_PINNED_LINE_MAX_CHARS = 400
 /** Default remaining-token distance at which the sensing tool warns. */
 const DEFAULT_WARNING_TOKENS = 6144
+/** Default distance before the rollover line at which the session pushes a warning. */
+const DEFAULT_WARN_TOKENS = 6144
+/** Default distance past the rollover line during which a rollover is postponed. */
+const DEFAULT_FALLBACK_TOKENS = 16384
 /** Default characters returned by one history read. */
 const DEFAULT_HISTORY_READ_MAX_CHARS = 4000
 /** Default hits returned by one history search. */
@@ -68,6 +72,9 @@ export const EXTRA_KEYS = [
   'newContextTool',
   'guidance',
   'warningTokens',
+  'warnTokens',
+  'fallbackTokens',
+  'notices',
   'historyReadMaxChars',
   'historySearchLimit',
   'historySnippetChars',
@@ -130,10 +137,13 @@ export function resolveConfig(config) {
     commandListMax: positiveInteger('commandListMax', config.commandListMax, DEFAULT_COMMAND_LIST_MAX),
     pinnedLineMaxChars: positiveInteger('pinnedLineMaxChars', config.pinnedLineMaxChars, DEFAULT_PINNED_LINE_MAX_CHARS),
     warningTokens: positiveInteger('warningTokens', config.warningTokens, DEFAULT_WARNING_TOKENS),
+    warnTokens: positiveInteger('warnTokens', config.warnTokens, DEFAULT_WARN_TOKENS),
+    fallbackTokens: positiveInteger('fallbackTokens', config.fallbackTokens, DEFAULT_FALLBACK_TOKENS),
     historyReadMaxChars: positiveInteger('historyReadMaxChars', config.historyReadMaxChars, DEFAULT_HISTORY_READ_MAX_CHARS),
     historySearchLimit: positiveInteger('historySearchLimit', config.historySearchLimit, DEFAULT_HISTORY_SEARCH_LIMIT),
     historySnippetChars: positiveInteger('historySnippetChars', config.historySnippetChars, DEFAULT_HISTORY_SNIPPET_CHARS),
     derivedAppendix: booleanValue('derivedAppendix', config.derivedAppendix),
+    notices: booleanValue('notices', config.notices),
     noteTool: booleanValue('noteTool', config.noteTool),
     sensingTool: booleanValue('sensingTool', config.sensingTool),
     historyTool: booleanValue('historyTool', config.historyTool),
