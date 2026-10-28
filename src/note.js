@@ -12,13 +12,17 @@
  */
 
 /** Opening tag of the note carried inside the compaction checkpoint. */
-const NOTE_OPEN_PREFIX = '<sticky-note'
+const NOTE_OPEN_TAG = '<sticky-note'
+/** Opening tag as it appears with its first attribute, used to find a prior note. */
+const NOTE_OPEN_PREFIX = `${NOTE_OPEN_TAG} version="`
 /** Number of the note inside the checkpoint, used to continue the count. */
 const NOTE_WINDOW_ATTRIBUTE = /window="(\d+)"/u
 /** Opening tag of the block a pin call renders into the conversation. */
 export const PINS_OPEN = '<sticky-note-pins>'
 /** Closing tag of the block a pin call renders into the conversation. */
 export const PINS_CLOSE = '</sticky-note-pins>'
+/** Tool whose result is the only place a pin block may come from. */
+export const PIN_TOOL_NAME = 'sticky_note'
 
 /** Text shown when a section has nothing to report. */
 const NONE = '- (none)'
@@ -49,7 +53,7 @@ function indexToolCalls(messages) {
  * @param {object} message - any conversation message.
  * @returns {string} its text blocks joined by newlines.
  */
-function textOf(message) {
+export function textOf(message) {
   /** @type {string[]} */
   const parts = []
   for (const block of message.content ?? []) {
@@ -125,26 +129,41 @@ function oneLine(text, maxChars) {
 }
 
 /**
- * Read the newest pinned-fact block anywhere in the evicted messages.
+ * Read the newest pinned-fact block from one text, if it holds one.
  *
- * A pin call's result is a normal tool message, so the latest block in surface
- * order is authoritative: a later pin call replaced the earlier set wholesale.
+ * A pin call renders its whole list, so the last block in a text is the
+ * authoritative one; an earlier block is already superseded.
+ * @param {string} text - message text that may contain a pin block.
+ * @returns {string[] | null} pinned lines, or null without a block.
+ */
+export function extractPins(text) {
+  const start = text.lastIndexOf(PINS_OPEN)
+  if (start === -1) return null
+  const end = text.indexOf(PINS_CLOSE, start)
+  if (end === -1) return null
+  return text.slice(start + PINS_OPEN.length, end)
+    .split('\n')
+    .map(line => line.replace(/^[-*]\s*/u, '').trim())
+    .filter(line => line.length > 0)
+}
+
+/**
+ * Read the newest pinned-fact block from the messages a pin tool produced.
+ *
+ * Provenance matters: the markers are ordinary text, so a file the agent read
+ * could contain them. Only a result answering a `sticky_note` call counts.
  * @param {readonly object[]} messages - evicted messages in surface order.
+ * @param {ReadonlyMap<string, { name: string }>} calls - tool calls by id.
  * @returns {string[]} pinned lines, or an empty list without a pin call.
  */
-function readPinnedBlocks(messages) {
+function readPinnedBlocks(messages, calls) {
   /** @type {string[]} */
   let latest = []
   for (const message of messages) {
-    const text = textOf(message)
-    const start = text.lastIndexOf(PINS_OPEN)
-    if (start === -1) continue
-    const end = text.indexOf(PINS_CLOSE, start)
-    if (end === -1) continue
-    latest = text.slice(start + PINS_OPEN.length, end)
-      .split('\n')
-      .map(line => line.replace(/^[-*]\s*/u, '').trim())
-      .filter(line => line.length > 0)
+    if (message.role !== 'tool') continue
+    if (calls.get(message.source?.callId)?.name !== PIN_TOOL_NAME) continue
+    const found = extractPins(textOf(message))
+    if (found !== null) latest = found
   }
   return latest
 }
@@ -201,7 +220,7 @@ function collectFacts(messages, config) {
   const calls = indexToolCalls(messages)
   /** @type {{ objective: string[], files: Map<string, Set<string>>, commands: string[], openIssues: string[] }} */
   const facts = { objective: [], files: new Map(), commands: [], openIssues: [] }
-  const pins = readPinnedBlocks(messages)
+  const pins = readPinnedBlocks(messages, calls)
   const previous = readPreviousNote(messages)
   let nextAction = ''
 
@@ -258,31 +277,53 @@ function collectFacts(messages, config) {
 
 /**
  * Render one bullet list, clipped to a byte budget.
+ *
+ * A section that cannot fit anything says so with `(none)` rather than a
+ * truncation marker, because the marker itself would exceed a zero budget and
+ * push the note past the size the transaction will accept.
  * @param {readonly string[]} lines - bullet bodies without the marker.
  * @param {number} maxBytes - UTF-8 budget for the whole section body.
  * @returns {string} the rendered section body.
  */
 function renderBullets(lines, maxBytes) {
-  if (lines.length === 0) return NONE
+  if (lines.length === 0 || maxBytes <= 0) return NONE
   const rendered = []
   let used = 0
   for (const line of lines) {
     const bullet = `- ${line}`
     const size = Buffer.byteLength(bullet, 'utf8') + 1
     if (used + size > maxBytes) {
-      rendered.push('- … further lines omitted')
+      const marker = '- … further lines omitted'
+      if (maxBytes - used >= Buffer.byteLength(marker, 'utf8') + 1) rendered.push(marker)
       break
     }
     rendered.push(bullet)
     used += size
   }
-  return rendered.join('\n')
+  return rendered.length === 0 ? NONE : rendered.join('\n')
+}
+
+/**
+ * Space the fixed parts of the note occupy.
+ * @param {string} lead - opening paragraph.
+ * @param {string} header - the open tag.
+ * @param {string} tail - closing paragraph.
+ * @param {readonly string[]} headings - section headings, in display order.
+ * @returns {number} bytes unavailable to section bodies.
+ */
+function framingBytes(lead, header, tail, headings) {
+  return Buffer.byteLength([lead, header, tail, ...headings].join('\n\n'), 'utf8')
 }
 
 /**
  * Assemble the note text from collected facts.
+ *
+ * Budget is allocated before rendering, not clipped after: the pinned list is
+ * the only model-authored content the note carries, so it claims its budget
+ * first and the derived sections take what remains. Framing is never part of
+ * the allocatable budget, which is what keeps the closing tag intact.
  * @param {object} facts - output of {@link collectFacts}.
- * @param {import('./config.js').NoteConfig} config - resolved note policy.
+ * @param {import('./config.js').ResolvedConfig} config - resolved policy.
  * @returns {string} the complete note text for the checkpoint message.
  */
 function renderNote(facts, config) {
@@ -291,46 +332,41 @@ function renderNote(facts, config) {
     .map(([path, tools]) => `${path} (${[...tools].join(', ')})`)
   const commands = facts.commands.slice(0, config.commandListMax)
 
-  const sections = [
-    ['## Objective', renderBullets(facts.objective, config.objectiveMaxBytes)],
-    ['## Verified state', renderBullets([...files, ...commands.map(c => `ran: ${c}`)], config.verifiedMaxBytes)],
-    ['## Open issues', renderBullets(facts.openIssues, config.openIssueMaxBytes)],
-    ['## Next action', renderBullets(facts.nextAction.length === 0 ? [] : [facts.nextAction], config.objectiveMaxBytes)],
-    ['## Pinned state', renderBullets(facts.pinned, config.pinnedMaxBytes)],
-  ]
-
-  const header = `${NOTE_OPEN_PREFIX} version="1" window="${facts.window}" evicted-messages="${facts.evicted}">`
-  const body = sections.map(([heading, content]) => `${heading}\n${content}`).join('\n\n')
   const lead = 'Sticky window note. Everything before the retained messages was evicted to reclaim context; '
     + 'this note is the durable state carried forward. Treat it as established background, continue directly, and do not acknowledge it.'
   const tail = 'Pin decisions this note cannot infer with the `sticky_note` tool before the next eviction.'
-  const text = `${lead}\n\n${header}\n${body}\n</sticky-note>\n\n${tail}`
-  return clipToBudget(text, config.noteMaxBytes)
-}
+  const header = `${NOTE_OPEN_TAG} version="1" window="${facts.window}" evicted-messages="${facts.evicted}">`
+  const close = '</sticky-note>'
+  const PINNED_HEADING = '## Pinned state'
+  const headings = ['## Objective', '## Verified state', '## Open issues', '## Next action', PINNED_HEADING]
 
-/**
- * Hard-clip the finished note, keeping the closing tag readable.
- * @param {string} text - complete note text.
- * @param {number} maxBytes - total UTF-8 budget.
- * @returns {string} the note, clipped when it exceeded the budget.
- */
-function clipToBudget(text, maxBytes) {
-  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
-  const marker = '\n… (note truncated at its configured budget)'
-  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, 'utf8'))
-  // Slice on a character boundary: a lone surrogate would corrupt the note.
-  let clipped = ''
-  for (const char of text) {
-    if (Buffer.byteLength(clipped + char, 'utf8') > budget) break
-    clipped += char
+  let available = Math.max(0, config.noteMaxBytes - framingBytes(lead, header, tail, headings))
+
+  // Claim order, most load-bearing first; display order is fixed below.
+  const plan = [
+    [PINNED_HEADING, facts.pinned, config.pinnedMaxBytes],
+    ['## Objective', facts.objective, config.objectiveMaxBytes],
+    ['## Next action', facts.nextAction.length === 0 ? [] : [facts.nextAction], config.objectiveMaxBytes],
+    ['## Open issues', facts.openIssues, config.openIssueMaxBytes],
+    ['## Verified state', [...files, ...commands.map(command => `ran: ${command}`)], config.verifiedMaxBytes],
+  ]
+  /** @type {Map<string, string>} */
+  const bodies = new Map()
+  for (const [heading, lines, cap] of plan) {
+    const budget = Math.min(cap, available)
+    const body = renderBullets(lines, budget)
+    bodies.set(heading, body)
+    available -= Buffer.byteLength(body, 'utf8') + 2
   }
-  return clipped + marker
+
+  const body = headings.map(heading => `${heading}\n${bodies.get(heading) ?? NONE}`).join('\n\n')
+  return `${lead}\n\n${header}\n${body}\n${close}\n\n${tail}`
 }
 
 /**
  * Build the note that replaces one evicted span.
  * @param {readonly object[]} messages - the evicted messages, in surface order.
- * @param {import('./config.js').NoteConfig} config - resolved note policy.
+ * @param {import('./config.js').ResolvedConfig} config - resolved policy.
  * @returns {{ text: string, window: number, evicted: number }} the rendered note and its facts.
  */
 export function buildStickyNote(messages, config) {

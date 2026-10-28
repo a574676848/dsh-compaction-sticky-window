@@ -130,7 +130,7 @@ test('a rollover replaces the evicted span with the sticky note', async () => {
   assert.equal(types.filter(type => type === 'compaction/end').length, 1)
 
   // The pin tool was registered as an effect of constructing the engine.
-  assert.deepEqual(registered.map(tool => tool.name), ['sticky_note'])
+  assert.deepEqual(registered.map(tool => tool.name).sort(), ['context_status', 'history_query', 'sticky_note'])
 })
 
 test('the summary record names this backend and claims no model call', async () => {
@@ -150,3 +150,103 @@ test('the summary record names this backend and claims no model call', async () 
   assert.ok(summary.data.shadowedTokenCount > 0)
   assert.ok(session.surface.nodes.length > 1)
 })
+
+test('an archived window is listable, searchable, and readable after a rollover', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(6)
+  const nodes = [...session.surface.nodes]
+  await engine.compactRegion(nodes[0], nodes[nodes.length - 3], { session, options: {} })
+
+  const history = registered.find(tool => tool.name === 'history_query')
+  const exec = { agent: { session } }
+
+  const windows = await history.execute({ action: 'windows' }, exec)
+  assert.equal(windows.total, 1)
+  assert.equal(windows.windows[0].window, 1)
+  assert.equal(windows.windows[0].items, 16)
+
+  const search = await history.execute({ action: 'search', query: 'src/module-2.ts' }, exec)
+  assert.ok(search.total > 0, 'the evicted file path is still findable')
+  assert.match(search.hits[0].snippet, /module-2/u)
+
+  const read = await history.execute({ action: 'read', id: search.hits[0].id }, exec)
+  assert.equal(read.found, true)
+  assert.match(read.item.text, /module-2/u)
+
+  const missing = await history.execute({ action: 'read', id: 'w9:9' }, exec)
+  assert.equal(missing.found, false)
+})
+
+test('context_status prices the remaining budget against the rollover line', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow: 100_000 }, defaultMaxTokens: 8000 }),
+  })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false, headroomTokens: 0, maxTokens: 1 })
+  const session = buildSession(2)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+
+  const status = registered.find(tool => tool.name === 'context_status')
+  const value = await status.execute({}, { agent: { session } })
+
+  assert.equal(value.available, true)
+  assert.equal(value.contextWindow, 100_000)
+  assert.equal(value.rolloverAtTokens, 80_000)
+  assert.equal(value.remainingTokens, 80_000 - value.usedTokens)
+  assert.equal(value.window, 1)
+  assert.equal(value.source, 'local-estimate')
+  assert.match(value.advice, /room to continue|rollover is close/u)
+})
+
+test('context_status refuses to invent a budget without a routed request', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false })
+  const session = buildSession(1)
+
+  const status = registered.find(tool => tool.name === 'context_status')
+  const value = await status.execute({}, { agent: { session } })
+
+  assert.equal(value.available, false)
+  assert.match(value.reason, /No request has been routed/u)
+})
+
+test('context_status reports a trigger refusal instead of a plausible number', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow: 1000 }, defaultMaxTokens: 0 }),
+  })
+  // Headroom exceeds the whole window, so the transaction refuses to compact.
+  const engine = new StickyWindowCompactionEngine(ctx, { auto: false, headroomTokens: 5000, maxTokens: 1 })
+  const session = buildSession(2)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+
+  const status = registered.find(tool => tool.name === 'context_status')
+  const value = await status.execute({}, { agent: { session } })
+
+  assert.equal(value.available, false)
+  assert.match(value.reason, /leaving no pressure budget|leaving no message budget/u)
+})
+

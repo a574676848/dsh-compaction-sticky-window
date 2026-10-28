@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-sticky-window",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sticky-note plus sliding-window context handling for DeepSeek Harness: retires the model-written summary and replaces it with a deterministic carried note in front of a verbatim recent window",
   "type": "module",
   "main": "index.js",
@@ -14,16 +14,17 @@
     "index.js",
     "src",
     "cordis.patch.yml",
+    "presets",
     "locale/*.json",
     "docs",
     "icon.svg",
     "README.md",
-    "README.zh.md",
     "LICENSE"
   ],
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node --test test/note.test.mjs test/engine.integration.mjs"
+    "test": "node --test test/note.test.mjs test/engine.integration.mjs",
+    "sync-preset": "node scripts/sync-preset.mjs"
   },
   "keywords": [
     "dsh",
@@ -39,7 +40,10 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/sticky-window.patch.yml"
+      ]
     }
   }
 }

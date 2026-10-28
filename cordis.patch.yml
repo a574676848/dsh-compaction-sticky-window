@@ -1,10 +1,19 @@
-# Sticky-window compaction replaces the shipped summarizing backend.
+# Sticky-window compaction, host plane.
 #
-# `compaction-basic` writes its replacement message with an auxiliary model
-# call. This bundle turns that row off and mounts the sticky-window backend in
-# its place, so the single `ctx.compaction` service this composition provides is
-# the sliding-window one. `command-compact` and every automatic trigger keep
-# working because they address the service, not the backend.
+# Two planes can own compaction, and this file handles the one that is a plain
+# profile row:
+#
+# 1. Host plane (CLI, headless, SDK profiles): `compaction-basic` is an ordinary
+#    row from the base bundle, so disabling it here and inserting this backend
+#    in its place means the summarizing one never runs.
+# 2. Preset plane (Web and Desktop profiles): the host rows are already disabled
+#    and each agent preset isolates its own `compaction`, so a row here cannot
+#    reach a session. `presets/sticky-window.patch.yml` carries that plane, and
+#    the registry default below selects it for new sessions.
+#
+# Leaving the host row in place on a preset profile is harmless: it provides a
+# service no isolated agent resolves. Removing `compaction-basic` on both planes
+# is what makes "the old mechanism never triggers" true rather than likely.
 - id: compaction-basic
   name: '@deepseek-ai/dsh-compaction-basic'
   disabled: true
@@ -19,3 +28,13 @@
         retainRatio: 0.35
         # The carried note is replaced wholesale on every rollover.
         noteMaxBytes: 6144
+
+# Select this bundle's preset for new sessions on a preset-backed profile.
+# A user's own choice in Settings wins over this default, so the setting stays
+# the person's to make; the override only decides what a fresh profile starts
+# with. The row is absent on host-plane profiles, where this patch is skipped
+# with a warning.
+- id: agent-preset-registry
+  name: '@deepseek-ai/dsh-agent-preset-registry'
+  config:
+    default: sticky-window

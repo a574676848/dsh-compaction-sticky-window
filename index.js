@@ -7,8 +7,13 @@
  * context, but changes what survives. Everything older than a retained verbatim
  * window is replaced by a deterministic note built from the evicted messages
  * themselves — objective, verified state, open issues, next action — plus the
- * facts the model pinned with the `sticky_note` tool. No model call is made, so
- * a rollover costs nothing and replays identically.
+ * facts the model pinned. No model call is made, so a rollover costs nothing and
+ * replays identically.
+ *
+ * Three tools close the loop the note alone cannot: `context_status` reports how
+ * much room is left before the next rollover, `sticky_note` reads and replaces
+ * the pinned list, and `history_query` reaches the evicted messages that the
+ * note compressed away.
  *
  * @module dsh-compaction-sticky-window
  */
@@ -16,27 +21,40 @@
 import z from '@deepseek-ai/schemastery'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { resolveNoteConfig, toLifecycleConfig } from './src/config.js'
-import { PINS_CLOSE, PINS_OPEN, buildStickyNote } from './src/note.js'
+import { resolveConfig, toLifecycleConfig } from './src/config.js'
+import { PINS_CLOSE, PINS_OPEN, PIN_TOOL_NAME, buildStickyNote, extractPins, textOf } from './src/note.js'
+import {
+  collectArchive,
+  currentWindowNumber,
+  describeWindows,
+  readArchivedItem,
+  searchArchive,
+} from './src/history.js'
+import { describeStatus, resolveRolloverBudget } from './src/budget.js'
+import { GUIDANCE_SECTION_NAME, GUIDANCE_SECTION_ORDER, GUIDANCE_TEXT } from './src/guidance.js'
 
 /** Bytes of framing the checkpoint wrapper adds around the note. */
 const CHECKPOINT_FRAMING_BYTES = 512
+
+/** Deepest argument nesting the note's path walk inspects. */
+const ARGUMENT_WALK_DEPTH = 3
 
 /**
  * Conservative note budget for one span.
  *
  * A note larger than the span it replaces fails the transaction's shrink check,
  * so the configured budget is trimmed to a fraction of what the span occupies.
- * Derived messages cost roughly a token per four bytes on both sides of that
- * comparison, which makes a byte comparison a safe proxy.
+ * The system head is excluded because the transaction prices only surface nodes
+ * when it decides whether the replacement is smaller.
  * @param {readonly object[]} messages - the messages about to be evicted.
- * @param {{ noteMaxBytes: number }} config - resolved note policy.
+ * @param {{ noteMaxBytes: number }} config - resolved plugin policy.
  * @returns {number} the byte budget this note may use.
  */
 function spanNoteBudget(messages, config) {
-  const spanBytes = Buffer.byteLength(JSON.stringify(messages), 'utf8')
+  const span = messages.filter(message => message.role !== 'system')
+  const spanBytes = Buffer.byteLength(JSON.stringify(span), 'utf8')
   const permitted = Math.floor(spanBytes / 2) - CHECKPOINT_FRAMING_BYTES
-  return Math.max(512, Math.min(config.noteMaxBytes, permitted))
+  return Math.max(0, Math.min(config.noteMaxBytes, permitted))
 }
 
 /**
@@ -58,56 +76,137 @@ function renderPins(pins) {
  * A pin replaces the previous set, so an empty list is rejected: an accidental
  * empty call must not silently erase the state the next rollover depends on.
  * @param {readonly string[]} raw - model-supplied lines, already schema-checked.
- * @param {{ pinnedLineMaxChars: number, pinnedMaxBytes: number }} config - resolved note policy.
+ * @param {{ pinnedLineMaxChars: number, pinnedMaxBytes: number }} config - resolved policy.
  * @returns {string[]} trimmed, deduplicated, bounded lines.
  * @throws {Error} when no usable line remains.
  */
 function toPins(raw, config) {
-  const limit = Math.max(1, Math.floor(config.pinnedMaxBytes / 32))
   /** @type {string[]} */
   const pins = []
   const seen = new Set()
+  let used = 0
   for (const entry of raw) {
     const line = entry.replace(/\s+/gu, ' ').trim().slice(0, config.pinnedLineMaxChars)
     if (line.length === 0 || seen.has(line)) continue
+    const size = Buffer.byteLength(line, 'utf8') + 3
+    if (used + size > config.pinnedMaxBytes) {
+      throw new Error(
+        `sticky_note: the pinned list exceeds the ${config.pinnedMaxBytes}-byte budget after `
+        + `${pins.length} ${pins.length === 1 ? 'entry' : 'entries'}; consolidate it and call again`,
+      )
+    }
     seen.add(line)
     pins.push(line)
+    used += size
   }
   if (pins.length === 0) {
     throw new Error('sticky_note: provide at least one non-empty pin')
   }
-  if (pins.length > limit) {
-    throw new Error(
-      `sticky_note: at most ${limit} pins fit the configured budget; `
-      + 'consolidate the list and call again',
-    )
+  return pins
+}
+
+/**
+ * Keep the pinned lines one note can actually carry.
+ *
+ * Read must not attest to a fact the next rollover is going to drop, so the
+ * reported list is the list a note of the current budget renders.
+ * @param {readonly string[]} pins - the full pinned list.
+ * @param {number} maxBytes - the note's pinned-section budget.
+ * @returns {string[]} the carried prefix.
+ */
+function carriedPins(pins, maxBytes) {
+  /** @type {string[]} */
+  const carried = []
+  let used = 0
+  for (const pin of pins) {
+    const size = Buffer.byteLength(`- ${pin}`, 'utf8') + 1
+    if (used + size > maxBytes) break
+    carried.push(pin)
+    used += size
+  }
+  return carried
+}
+
+/**
+ * Read the pinned list currently carried by this session.
+ *
+ * The newest pin block in the log is authoritative, including one already
+ * carried into the note by a rollover.
+ * @param {object} session - the session to read.
+ * @returns {string[]} pinned lines, empty when nothing was pinned yet.
+ */
+function currentPins(session) {
+  const events = session.snapshotEvents()
+  /** @type {Map<string, string>} */
+  const calls = new Map()
+  for (const event of events) {
+    if (event.type === 'tool/call') calls.set(event.data.callId, event.data.name)
+  }
+  /** @type {string[]} */
+  let pins = []
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
+    if (calls.get(event.data.message?.source?.callId) !== PIN_TOOL_NAME) continue
+    const found = extractPins(textOf(event.data.message))
+    if (found !== null) pins = found
+  }
+  if (pins.length > 0) return pins
+  for (const message of session.deriveMessages()) {
+    if (message.source?.kind !== 'compact-checkpoint') continue
+    const section = /## Pinned state\n([\s\S]*?)(?:\n## |\n<\/sticky-note>)/u.exec(textOf(message))
+    if (section === null) continue
+    const lines = section[1]
+      .split('\n')
+      .map(line => line.replace(/^[-*]\s*/u, '').trim())
+      .filter(line => line.length > 0 && line !== '(none)')
+    if (lines.length > 0) pins = lines
   }
   return pins
 }
 
 /** Model-facing contract of the pin tool. */
 const PIN_TOOL_DESCRIPTION =
-  'Pin durable facts that must survive context eviction. This session keeps a sliding context window: '
-  + 'older messages are replaced by a sticky note that carries the pinned list forward verbatim, while the '
-  + 'recent window stays intact. Call this once a decision, constraint, or open problem must not be lost, '
-  + 'and again after it changes. Each call replaces the whole pinned list, so send the complete set you '
-  + 'want carried. Write terse imperative lines: what is decided, what is verified, what remains. '
-  + 'Echo the current list when only one entry changes.'
+  'Pin durable facts that must survive context eviction, and read them back. This session keeps a '
+  + 'sliding context window: older messages are replaced by a sticky note that carries the pinned list '
+  + 'forward verbatim, while the recent window stays intact. Call `update` once a decision, constraint, '
+  + 'or open problem must not be lost, and again after it changes. Each `update` replaces the whole '
+  + 'pinned list, so send the complete set you want carried; write terse imperative lines stating what '
+  + 'is decided, what is verified, and what remains. Call `read` to see exactly what is carried now.'
+
+/** Model-facing contract of the sensing tool. */
+const SENSING_TOOL_DESCRIPTION =
+  'Report how much of this window is left before the session rolls over to a new one. Returns the '
+  + 'tokens used, the rollover line, the tokens remaining, the current window ordinal, and whether the '
+  + 'number comes from provider usage or a local estimate. Call it when you are unsure whether there is '
+  + 'room for one more large step, and to decide whether to pin state now.'
+
+/** Model-facing contract of the recall tool. */
+const HISTORY_TOOL_DESCRIPTION =
+  'Read the conversation that earlier rollovers evicted. Nothing is deleted: each rollover archives the '
+  + 'messages it replaced, addressable by window and position. `windows` lists the archived windows, '
+  + '`search` finds a case-sensitive literal across archived text and returns item ids, and `read` '
+  + 'returns one item by id. The current window is not archived yet, so it never appears here. Use this '
+  + 'when the sticky note is not detailed enough and the exact earlier wording, path, or error matters.'
 
 /**
  * Build the pin tool for one resolved configuration.
- * @param {{ pinnedLineMaxChars: number, pinnedMaxBytes: number }} config - resolved note policy.
+ * @param {object} config - resolved plugin policy.
  * @returns {object} a tool definition for `ctx.tools.register`.
  */
-function createStickyNoteTool(config) {
+function createPinTool(config) {
   return defineTool({
     name: 'sticky_note',
     description: PIN_TOOL_DESCRIPTION,
     parameters: {
+      action: {
+        type: 'string',
+        required: true,
+        enum: ['read', 'update'],
+        description: 'read returns the carried list; update replaces it with `pins`.',
+      },
       pins: {
         type: 'array',
-        required: true,
-        description: 'The COMPLETE pinned list, replacing any previously pinned list.',
+        description: 'The COMPLETE pinned list, replacing any previous list. Required for `update`.',
         items: { type: 'string' },
       },
     },
@@ -116,28 +215,291 @@ function createStickyNoteTool(config) {
         type: 'object',
         additionalProperties: false,
         properties: {
+          action: { type: 'string', required: true },
           pins: { type: 'array', required: true, items: { type: 'string' } },
           count: { type: 'integer', required: true },
+          total: { type: 'integer', required: true },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: renderPins(value.pins) }],
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.count === 0
+          ? 'No facts are pinned yet, so the sticky note carries only what it derives from the messages.'
+          : renderPins(value.pins)
+            + (value.total > value.count
+              ? ` Only ${value.count} of ${value.total} pinned lines fit the note budget; consolidate the list.`
+              : ''),
+      }],
     },
-    execute(args) {
+    execute(args, exec) {
+      const session = requireSession(exec, 'sticky_note')
+      if (args.action === 'read') {
+        const all = currentPins(session)
+        const carried = carriedPins(all, config.pinnedMaxBytes)
+        return Promise.resolve({ action: 'read', pins: carried, count: carried.length, total: all.length })
+      }
+      if (args.pins === undefined) {
+        throw new Error('sticky_note: `pins` is required for action `update`')
+      }
       const pins = toPins(args.pins, config)
-      return Promise.resolve({ pins, count: pins.length })
+      return Promise.resolve({ action: 'update', pins, count: pins.length, total: pins.length })
     },
-    presentCall: args => ({ card: 'generic', title: 'Pin sticky note', kind: 'other', rawInput: args.pins }),
+    presentCall: args => ({ card: 'generic', title: 'Sticky note', kind: 'other', rawInput: args.pins ?? args.action }),
   })
 }
 
-/** Byte- or count-valued note budget shared by the schema. */
+/**
+ * Build the sensing tool bound to the engine that owns the transaction policy.
+ * @param {object} engine - the compaction engine whose config and services answer the question.
+ * @returns {object} a tool definition for `ctx.tools.register`.
+ */
+function createSensingTool(engine) {
+  return defineTool({
+    name: 'context_status',
+    description: SENSING_TOOL_DESCRIPTION,
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          available: { type: 'boolean', required: true },
+          reason: { type: 'string' },
+          window: { type: 'integer' },
+          usedTokens: { type: 'integer' },
+          remainingTokens: { type: 'integer' },
+          rolloverAtTokens: { type: 'integer' },
+          contextWindow: { type: 'integer' },
+          reservedCompletionTokens: { type: 'integer' },
+          source: { type: 'string' },
+          advice: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderStatus(value) }],
+    },
+    async execute(_args, exec) {
+      const session = requireSession(exec, 'context_status')
+      const header = session.requestHeader()
+      if (header === undefined) {
+        return { available: false, reason: 'No request has been routed in this session yet.' }
+      }
+      const { provider, model, maxTokens } = header.config
+      if (provider.length === 0 || model.length === 0) {
+        return { available: false, reason: 'The latest request carries no routed model.' }
+      }
+      const measurement = engine.ctx.tokenMeter.measure(session)
+      const signal = exec.signal ?? new AbortController().signal
+      let info
+      try {
+        info = await engine.ctx.llm.resolveModelInfo(provider, model, signal)
+      } catch (error) {
+        // A cancelled call must not read as "no budget available".
+        signal.throwIfAborted()
+        return {
+          available: false,
+          reason: `Cannot resolve ${provider}/${model}: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      const contextWindow = info.context?.contextWindow
+      if (typeof contextWindow !== 'number' || !Number.isInteger(contextWindow) || contextWindow <= 0) {
+        return {
+          available: false,
+          reason: `${provider}/${model} declares no context window, so no rollover line exists; `
+            + 'configure contextWindow on that adapter model.',
+        }
+      }
+      const reservedCompletionTokens = maxTokens ?? info.defaultMaxTokens ?? 0
+      const budget = resolveRolloverBudget(
+        engine.config, { provider, model }, contextWindow, reservedCompletionTokens,
+      )
+      if (budget.problem !== undefined) {
+        return { available: false, reason: `${provider}/${model}: ${budget.problem}` }
+      }
+      const status = describeStatus({
+        usedTokens: measurement.totalTokens,
+        providerMeasured: measurement.baseline.kind === 'usage',
+        contextWindow,
+        reservedCompletionTokens,
+        rolloverAtTokens: budget.thresholdTokens,
+        windowNumber: currentWindowNumber(session),
+        warningTokens: engine.policy.warningTokens,
+      })
+      return { available: true, ...status }
+    },
+    presentCall: () => ({ card: 'generic', title: 'Context status', kind: 'other' }),
+  })
+}
+
+/**
+ * Render one sensing result for the model.
+ * @param {object} value - the tool's output value.
+ * @returns {string} a short, actionable report.
+ */
+function renderStatus(value) {
+  if (value.available !== true) return `Context status unavailable: ${value.reason ?? 'unknown reason'}`
+  return [
+    `Window ${value.window}: ${value.usedTokens} of ${value.rolloverAtTokens} tokens used `
+      + `(${value.contextWindow} context, ${value.reservedCompletionTokens} reserved for the reply).`,
+    `Remaining before rollover: ${value.remainingTokens} tokens (source: ${value.source}).`,
+    value.advice,
+  ].join('\n')
+}
+
+/**
+ * Build the recall tool over the session archive.
+ * @param {object} config - resolved plugin policy.
+ * @returns {object} a tool definition for `ctx.tools.register`.
+ */
+function createHistoryTool(config) {
+  return defineTool({
+    name: 'history_query',
+    description: HISTORY_TOOL_DESCRIPTION,
+    parameters: {
+      action: {
+        type: 'string',
+        required: true,
+        enum: ['windows', 'search', 'read'],
+        description: 'windows lists archived windows; search finds a literal; read returns one item.',
+      },
+      query: { type: 'string', description: 'Case-sensitive literal to find. Required for `search`.' },
+      id: { type: 'string', description: 'Item id such as `w1:2`. Required for `read`.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true },
+          total: { type: 'integer' },
+          truncated: { type: 'boolean' },
+          windows: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                window: { type: 'integer', required: true },
+                items: { type: 'integer', required: true },
+                evictedTokens: { type: 'integer', required: true },
+                firstTime: { type: 'integer', required: true },
+                lastTime: { type: 'integer', required: true },
+                idRange: { type: 'string', required: true },
+              },
+            },
+          },
+          hits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                window: { type: 'integer', required: true },
+                role: { type: 'string', required: true },
+                occurrences: { type: 'integer', required: true },
+                snippet: { type: 'string', required: true },
+              },
+            },
+          },
+          found: { type: 'boolean' },
+          item: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', required: true },
+              window: { type: 'integer', required: true },
+              role: { type: 'string', required: true },
+              truncated: { type: 'boolean', required: true },
+              text: { type: 'string', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderHistory(value) }],
+    },
+    execute(args, exec) {
+      const session = requireSession(exec, 'history_query')
+      const archive = collectArchive(session)
+      if (args.action === 'windows') {
+        const windows = describeWindows(archive)
+        return Promise.resolve({ action: 'windows', total: windows.length, windows })
+      }
+      if (args.action === 'search') {
+        if (args.query === undefined || args.query.length === 0) {
+          throw new Error('history_query: `query` is required for action `search`')
+        }
+        return Promise.resolve({
+          action: 'search',
+          ...searchArchive(archive, args.query, config.historySearchLimit, config.historySnippetChars),
+        })
+      }
+      if (args.id === undefined || args.id.length === 0) {
+        throw new Error('history_query: `id` is required for action `read`')
+      }
+      const item = readArchivedItem(archive, args.id, config.historyReadMaxChars)
+      return Promise.resolve({ action: 'read', found: item.found, ...item.found ? { item } : {} })
+    },
+    presentCall: args => ({ card: 'generic', title: 'History query', kind: 'other', rawInput: { action: args.action, query: args.query ?? args.id } }),
+  })
+}
+
+/**
+ * Render one recall result for the model.
+ * @param {object} value - the tool's output value.
+ * @returns {string} a short, readable report.
+ */
+function renderHistory(value) {
+  switch (value.action) {
+    case 'windows': {
+      if (value.total === 0) return 'Nothing has been archived yet: this session has not rolled over.'
+      return [
+        `${value.total} archived ${value.total === 1 ? 'window' : 'windows'}, oldest first:`,
+        ...value.windows.map(window => `- window ${window.window}: ${window.items} items, `
+          + `${window.evictedTokens} tokens, ids ${window.idRange}`),
+      ].join('\n')
+    }
+    case 'search': {
+      if (value.total === 0) return 'No archived item contains that literal.'
+      const header = `${value.total} matching ${value.total === 1 ? 'item' : 'items'}`
+        + `${value.truncated ? `, showing the first ${value.hits.length}` : ''}:`
+      return [
+        header,
+        ...value.hits.map(hit => `- ${hit.id} (${hit.role}, ${hit.occurrences}x): ${hit.snippet}`),
+      ].join('\n')
+    }
+    case 'read': {
+      if (value.found !== true) return 'No archived item carries that id.'
+      return `${value.item.id} (${value.item.role}, window ${value.item.window}`
+        + `${value.item.truncated ? ', truncated' : ''}):\n${value.item.text}`
+    }
+    default:
+      return 'Unknown history action.'
+  }
+}
+
+/**
+ * Require the calling agent's session.
+ * @param {object} exec - tool execution context.
+ * @param {string} tool - tool name for the diagnostic.
+ * @returns {object} the owning session.
+ * @throws {Error} when the call has no owning agent.
+ */
+function requireSession(exec, tool) {
+  const session = exec.agent?.session
+  if (session === undefined) {
+    throw new Error(`${tool} requires an owning agent session`)
+  }
+  return session
+}
+
+/** Byte- or count-valued budget shared by the schema. */
 const COUNT = () => z.number().step(1).min(1)
 
 /**
  * Schemastery schema for the complete plugin config.
  *
  * Every lifecycle key is optional here because an absent key leaves the
- * shipped default in force; {@link resolveNoteConfig} owns the note defaults.
+ * shipped default in force; {@link resolveConfig} owns the remaining defaults.
  */
 const CONFIG_SCHEMA = z.object({
   thresholdRatio: z.number(),
@@ -168,7 +530,14 @@ const CONFIG_SCHEMA = z.object({
   fileListMax: COUNT(),
   commandListMax: COUNT(),
   pinnedLineMaxChars: COUNT(),
+  warningTokens: COUNT(),
+  historyReadMaxChars: COUNT(),
+  historySearchLimit: COUNT(),
+  historySnippetChars: COUNT(),
   noteTool: z.boolean(),
+  sensingTool: z.boolean(),
+  historyTool: z.boolean(),
+  guidance: z.boolean(),
 })
 
 /**
@@ -180,7 +549,7 @@ const CONFIG_SCHEMA = z.object({
  * content changes, from a model summary to the carried note.
  */
 export class StickyWindowCompactionEngine extends BasicCompactionEngine {
-  /** Services the transaction and the pin tool require. */
+  /** Services the transaction and the tools require. */
   static inject = ['llm', 'tokenMeter', 'sessions', 'tools']
 
   /** Complete plugin config schema. */
@@ -191,12 +560,33 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
    * @param {Record<string, unknown>} [config] - raw plugin config.
    */
   constructor(ctx, config = {}) {
-    const noteConfig = resolveNoteConfig(config)
+    const policy = resolveConfig(config)
     super(ctx, toLifecycleConfig(config))
-    /** Resolved note policy; see {@link import('./src/config.js').NoteConfig}. */
-    this.noteConfig = noteConfig
-    if (noteConfig.noteTool) {
-      ctx.effect(() => ctx.tools.register(createStickyNoteTool(noteConfig)))
+    /** Resolved plugin policy for the note and the tools. */
+    this.policy = policy
+    const tools = [
+      policy.noteTool ? createPinTool(policy) : null,
+      policy.sensingTool ? createSensingTool(this) : null,
+      policy.historyTool ? createHistoryTool(policy) : null,
+    ].filter(tool => tool !== null)
+    if (tools.length > 0) {
+      ctx.effect(() => {
+        const disposers = tools.map(tool => ctx.tools.register(tool))
+        return () => { for (const dispose of disposers) dispose() }
+      })
+    }
+    if (policy.guidance) {
+      // The prompt registry is optional: a composition without it (a bare SDK
+      // host) still compacts, it just cannot tell the model how to cooperate.
+      const prompt = ctx.get('systemPrompt')
+      if (prompt !== undefined) {
+        ctx.effect(() => prompt.section({
+          name: GUIDANCE_SECTION_NAME,
+          order: GUIDANCE_SECTION_ORDER,
+          text: GUIDANCE_TEXT,
+          interpolate: false,
+        }))
+      }
     }
   }
 
@@ -213,8 +603,8 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
    */
   async summarize(input, agent, signal) {
     signal?.throwIfAborted()
-    const budget = spanNoteBudget(input.messages, this.noteConfig)
-    const { text } = buildStickyNote(input.messages, { ...this.noteConfig, noteMaxBytes: budget })
+    const budget = spanNoteBudget(input.messages, this.policy)
+    const { text } = buildStickyNote(input.messages, { ...this.policy, noteMaxBytes: budget })
     return {
       summary: [{ type: 'text', text }],
       provider: 'dsh-compaction-sticky-window',

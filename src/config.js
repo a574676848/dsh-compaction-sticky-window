@@ -1,11 +1,11 @@
 /**
  * Configuration for the sticky-window compaction backend.
  *
- * Two disjoint groups share one config object: window lifecycle fields the
- * compaction transaction already understands, and note fields that decide what
- * the carried sticky note contains. Lifecycle fields are forwarded untouched so
- * this backend inherits the shipped pressure policy; note fields are resolved
- * here into byte budgets.
+ * Three disjoint groups share one config object: window lifecycle fields the
+ * compaction transaction already understands, note fields that decide what the
+ * carried sticky note contains, and tool fields that decide what the model can
+ * ask about its own context. Lifecycle fields are forwarded untouched so this
+ * backend inherits the shipped pressure policy; the rest are resolved here.
  *
  * @module dsh-compaction-sticky-window/config
  */
@@ -28,23 +28,6 @@ export const LIFECYCLE_KEYS = [
   'auto',
 ]
 
-/**
- * Note fields this backend owns. Every one is a deployment choice: a person who
- * runs short tasks wants a smaller note than one who runs long migrations.
- */
-export const NOTE_KEYS = [
-  'noteMaxBytes',
-  'objectiveMaxBytes',
-  'verifiedMaxBytes',
-  'openIssueMaxBytes',
-  'pinnedMaxBytes',
-  'objectiveMessages',
-  'fileListMax',
-  'commandListMax',
-  'pinnedLineMaxChars',
-  'noteTool',
-]
-
 /** Default carried-note budget in UTF-8 bytes. */
 const DEFAULT_NOTE_MAX_BYTES = 6144
 /** Default budget for the objective section. */
@@ -63,9 +46,42 @@ const DEFAULT_FILE_LIST_MAX = 24
 const DEFAULT_COMMAND_LIST_MAX = 12
 /** Default per-line character cap for a pinned fact. */
 const DEFAULT_PINNED_LINE_MAX_CHARS = 400
+/** Default remaining-token distance at which the sensing tool warns. */
+const DEFAULT_WARNING_TOKENS = 6144
+/** Default characters returned by one history read. */
+const DEFAULT_HISTORY_READ_MAX_CHARS = 4000
+/** Default hits returned by one history search. */
+const DEFAULT_HISTORY_SEARCH_LIMIT = 5
+/** Default characters of context shown around a history search hit. */
+const DEFAULT_HISTORY_SNIPPET_CHARS = 400
 
-/** Resolved note policy; every value is a positive integer except {@link noteTool}. */
-export class NoteConfig {
+/**
+ * Every field this plugin accepts, besides {@link LIFECYCLE_KEYS}.
+ *
+ * Note fields shape the carried note; tool fields shape what the model can ask.
+ */
+export const EXTRA_KEYS = [
+  'noteMaxBytes',
+  'objectiveMaxBytes',
+  'verifiedMaxBytes',
+  'openIssueMaxBytes',
+  'pinnedMaxBytes',
+  'objectiveMessages',
+  'fileListMax',
+  'commandListMax',
+  'pinnedLineMaxChars',
+  'noteTool',
+  'sensingTool',
+  'historyTool',
+  'guidance',
+  'warningTokens',
+  'historyReadMaxChars',
+  'historySearchLimit',
+  'historySnippetChars',
+]
+
+/** Resolved plugin policy; frozen so a later mutation cannot change behavior mid-session. */
+export class ResolvedConfig {
   /**
    * @param {object} values - resolved values, already validated.
    */
@@ -94,25 +110,21 @@ export function toLifecycleConfig(config) {
 }
 
 /**
- * Validate the complete plugin config and resolve note budgets.
+ * Validate the complete plugin config and resolve every budget.
  *
  * Unknown keys fail here instead of being dropped: a misspelled budget would
  * otherwise silently fall back to a default the deployer never chose.
  * @param {Record<string, unknown>} config - raw plugin config.
- * @returns {NoteConfig} the resolved note policy.
+ * @returns {ResolvedConfig} the resolved policy.
  * @throws {Error} when a key is unknown or a value is out of range.
  */
-export function resolveNoteConfig(config) {
+export function resolveConfig(config) {
   for (const key of Object.keys(config)) {
-    if (!LIFECYCLE_KEYS.includes(key) && !NOTE_KEYS.includes(key)) {
+    if (!LIFECYCLE_KEYS.includes(key) && !EXTRA_KEYS.includes(key)) {
       throw new Error(`dsh-compaction-sticky-window: unknown config key "${key}"`)
     }
   }
-  const noteTool = config.noteTool
-  if (noteTool !== undefined && typeof noteTool !== 'boolean') {
-    throw new Error('dsh-compaction-sticky-window: noteTool must be a boolean')
-  }
-  return new NoteConfig({
+  return new ResolvedConfig({
     noteMaxBytes: positiveInteger('noteMaxBytes', config.noteMaxBytes, DEFAULT_NOTE_MAX_BYTES),
     objectiveMaxBytes: positiveInteger('objectiveMaxBytes', config.objectiveMaxBytes, DEFAULT_OBJECTIVE_MAX_BYTES),
     verifiedMaxBytes: positiveInteger('verifiedMaxBytes', config.verifiedMaxBytes, DEFAULT_VERIFIED_MAX_BYTES),
@@ -122,7 +134,14 @@ export function resolveNoteConfig(config) {
     fileListMax: positiveInteger('fileListMax', config.fileListMax, DEFAULT_FILE_LIST_MAX),
     commandListMax: positiveInteger('commandListMax', config.commandListMax, DEFAULT_COMMAND_LIST_MAX),
     pinnedLineMaxChars: positiveInteger('pinnedLineMaxChars', config.pinnedLineMaxChars, DEFAULT_PINNED_LINE_MAX_CHARS),
-    noteTool: noteTool ?? true,
+    warningTokens: positiveInteger('warningTokens', config.warningTokens, DEFAULT_WARNING_TOKENS),
+    historyReadMaxChars: positiveInteger('historyReadMaxChars', config.historyReadMaxChars, DEFAULT_HISTORY_READ_MAX_CHARS),
+    historySearchLimit: positiveInteger('historySearchLimit', config.historySearchLimit, DEFAULT_HISTORY_SEARCH_LIMIT),
+    historySnippetChars: positiveInteger('historySnippetChars', config.historySnippetChars, DEFAULT_HISTORY_SNIPPET_CHARS),
+    noteTool: booleanValue('noteTool', config.noteTool),
+    sensingTool: booleanValue('sensingTool', config.sensingTool),
+    historyTool: booleanValue('historyTool', config.historyTool),
+    guidance: booleanValue('guidance', config.guidance),
   })
 }
 
@@ -138,6 +157,21 @@ function positiveInteger(name, value, fallback) {
   if (value === undefined) return fallback
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(`dsh-compaction-sticky-window: ${name} must be a positive integer`)
+  }
+  return value
+}
+
+/**
+ * Read one optional boolean, defaulting to enabled.
+ * @param {string} name - config key, used in the diagnostic.
+ * @param {unknown} value - configured value or undefined.
+ * @returns {boolean} the validated value.
+ * @throws {Error} when present and not a boolean.
+ */
+function booleanValue(name, value) {
+  if (value === undefined) return true
+  if (typeof value !== 'boolean') {
+    throw new Error(`dsh-compaction-sticky-window: ${name} must be a boolean`)
   }
   return value
 }
