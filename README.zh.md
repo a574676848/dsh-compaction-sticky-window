@@ -14,6 +14,8 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-compaction-sticky-windo
 
 也可以在插件页面安装并启用。bundle 补丁会在 profile 暴露的每一个平面上停用摘要后端，不需要再改其它组合。
 
+0.8.2 的快照按 DSH 0.2.2-rc.1 的 `standard` 生成，因此 `engines.dsh` 从 0.2.2-rc.1 起。要装到别的 0.2.x 版本上，先 `node scripts/sync-preset.mjs` 再安装：preset 里每一行的插件名都必须存在于目标安装，否则那一行不会启动，新会话会直接失败。
+
 ## 安装新增什么，替换什么
 
 安装**新增四个工具**、**替换压缩后端**。它不拿走任何工具，也不改变你的会话当前使用的 preset。
@@ -27,7 +29,7 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-compaction-sticky-windo
 
 本 bundle 仍然绝不触碰 `agent-preset-registry`。强行改默认 preset 会把每个打开中的会话切到另一个 preset，这和"在会话原本使用的 preset 内部替换后端"是两件事。
 
-重述的子列表 = shipped `standard` 换掉压缩组，且 `npm run sync-preset` 在写快照前会校验插件 id 集合与它读取的安装完全一致。DSH 升级后请重新运行。
+重述的子列表 = shipped `standard` 换掉压缩组，且 `npm run sync-preset` 在写快照前会校验插件 id 集合与它读取的安装完全一致。DSH 升级后请重新运行：快照落后于安装时，preset 里会留着安装已不再导出的插件名，那一行永远不会启动，于是**每次新开会话都失败**（`agent-preset/invalid: … never started`）。`npm test` 会先一步拦住——`test/preset-sync.test.mjs` 用 `--check` 比对快照与本机安装，并逐行解析插件名。
 
 ## 窗口生命周期
 
@@ -217,8 +219,9 @@ bundle 注册了一个 `systemPrompt` 段（order 9000），说明窗口是什�
 ## 开发
 
 ```sh
-node --test test/note.test.mjs test/engine.integration.mjs
-node scripts/sync-preset.mjs
+npm test                             # 含 test/preset-sync.test.mjs：快照与本机安装是否仍一致
+node scripts/sync-preset.mjs         # 按本机安装重写快照
+node scripts/sync-preset.mjs --check # 只比对不写；升级 DSH 后先跑这个
 ```
 
 `test/engine.integration.mjs` 用手工搭建的 Cordis Context 驱动真实换窗，走的是自带压缩事务，并断言新窗口确实只有便签与当前 turn —— 其中包括一个长 turn：它活得比自己之前的历史更久，只能在最后一个 step 换窗。
@@ -231,7 +234,7 @@ node scripts/sync-preset.mjs
 - 如果模型始终不写便签，窗口会一直撑到 Provider 确认溢出才被迫结束。这是有意的——未准备的换窗会丢状态——但也意味着无视所有提醒的模型会走到硬失败，而不是被安静地换掉。
 - 便签的交接是从整个会话读取的，所以在触发换窗的那个 turn 里写的便签同样会被带走。
 - 单条不可分割、本身就撑满窗口的消息，无法靠换窗修复；可选的 tool-result pruner 仍会在选择区间前运行。
-- 该覆盖是目标 DSH 版本上 `standard` 的一份快照。DSH 升级可能改动那个 preset 而本包不会察觉；跑 `sync-preset` 并发布新版本。目标版本已验证：重述后的列表与安装里 `standard` 的 19 个顶层插件 id 完全一致。
+- 该覆盖是目标 DSH 版本上 `standard` 的一份快照。DSH 升级可能改动那个 preset 而本包不会察觉；跑 `sync-preset` 并发布新版本。当前验证版本 DSH 0.2.2-rc.1：重述后的列表与安装里 `standard` 的 22 个顶层插件 id 完全一致，每一行插件名也都能从安装解析——0.2.1 线的 `@deepseek-ai/dsh-tool-subagent-control/list-agents` 在 0.2.2 已并入父包，快照留在旧名字上就会让新会话全部失败。
 - 覆盖对**启用之后新开始**的会话生效。已经在运行的会话保持它启动时挂载的 preset，因此要拿到新后端请重启（或新开会话）；无论哪种情况，它现有的工具都不会减少。
 - 预算提醒以普通 `user/message` 事件、`sticky-window-notice` 源类型追加。会话格式允许扩展源类型，因此卸载插件后日志仍可读，但旧版读取器不认识这个名字。
 - 在某个 DSH 版本上，如果自带后端在**模型切换**时绕过 `compactIfNeeded` 触发压缩，那次切换仍可能在没通过便签门禁的情况下换窗。目标 0.2.0 线没有这条路径；更晚的线需要本后端一并拦下。

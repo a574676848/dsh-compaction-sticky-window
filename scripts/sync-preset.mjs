@@ -13,11 +13,15 @@
  * change when this bundle is installed.
  *
  * Usage:
- *   node scripts/sync-preset.mjs [--from <standard.patch.yml>] [--out <file>]
+ *   node scripts/sync-preset.mjs [--from <standard.patch.yml>] [--out <file>] [--check]
  *
  * With no arguments it reads `@deepseek-ai/dsh-web-app/presets/standard.patch.yml`
  * resolved from the current Node installation, and writes
  * `presets/sticky-window.patch.yml` beside this package.
+ *
+ * With `--check` it writes nothing and exits non-zero when the committed file
+ * differs from what this installation would generate, which is what makes a
+ * stale snapshot after a DSH upgrade fail a test instead of a session.
  */
 
 import fs from 'node:fs'
@@ -240,6 +244,20 @@ const out = option(argv, '--out')
 const source = fs.readFileSync(from, 'utf8')
 const generated = rewrite(source)
 const plugins = assertSameChildren(source, generated)
-fs.mkdirSync(path.dirname(out), { recursive: true })
-fs.writeFileSync(out, `${generated.trimEnd()}\n`, 'utf8')
-process.stdout.write(`wrote ${out} from ${from} (${plugins} plugins, id set unchanged)\n`)
+const text = `${generated.trimEnd()}\n`
+if (argv.includes('--check')) {
+  const committed = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : ''
+  if (committed !== text) {
+    process.stderr.write(
+      `preset is stale: ${out}\n`
+      + `is not ${from} with the compaction group swapped\n`
+      + 'run: node scripts/sync-preset.mjs\n',
+    )
+    process.exit(1)
+  }
+  process.stdout.write(`preset matches ${from} (${plugins} plugins, id set unchanged)\n`)
+} else {
+  fs.mkdirSync(path.dirname(out), { recursive: true })
+  fs.writeFileSync(out, text, 'utf8')
+  process.stdout.write(`wrote ${out} from ${from} (${plugins} plugins, id set unchanged)\n`)
+}

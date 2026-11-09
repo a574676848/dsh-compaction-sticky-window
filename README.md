@@ -16,6 +16,8 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-compaction-sticky-windo
 
 Or through the Plugins page, which installs the bundle and enables it. The bundle patch retires the summarizing backend on every plane the profile exposes, so nothing else needs composing.
 
+The 0.8.2 snapshot is generated from `standard` at DSH 0.2.2-rc.1, so `engines.dsh` starts there. To install it on another 0.2.x release, run `node scripts/sync-preset.mjs` first and install that: every row in the preset must name a plugin the target installation exports, or that row never starts and new sessions fail.
+
 ## What installing adds, and what it replaces
 
 Installing adds four tools and replaces the compaction backend. It takes no tool away, and it does not change which preset your sessions use.
@@ -29,7 +31,7 @@ On a preset-backed profile a host-plane row cannot reach a session: the preset i
 
 This bundle still never touches `agent-preset-registry`. Forcing a different default preset would switch every open session onto an unfamiliar preset, which is a different operation from replacing a backend inside the preset those sessions already use.
 
-The restated child list is the shipped `standard` list with the compaction group swapped, and `npm run sync-preset` refuses to write a snapshot whose plugin ids differ from the installation it read. Re-run it after a DSH upgrade.
+The restated child list is the shipped `standard` list with the compaction group swapped, and `npm run sync-preset` refuses to write a snapshot whose plugin ids differ from the installation it read. Re-run it after a DSH upgrade: a snapshot that lags the installation keeps a plugin name the installation no longer exports, that row never starts, and **every new session fails** (`agent-preset/invalid: … never started`). `npm test` catches it first — `test/preset-sync.test.mjs` compares the snapshot with the local installation through `--check` and resolves every plugin name.
 
 ## The window lifecycle
 
@@ -220,8 +222,9 @@ The note budget is additionally trimmed to half of the span it replaces, so a sm
 ## Development
 
 ```sh
-node --test test/note.test.mjs test/engine.integration.mjs
-node scripts/sync-preset.mjs
+npm test                             # includes test/preset-sync.test.mjs: snapshot vs. local installation
+node scripts/sync-preset.mjs         # rewrite the snapshot from the local installation
+node scripts/sync-preset.mjs --check # compare only, write nothing; run this first after upgrading DSH
 ```
 
 `test/engine.integration.mjs` drives real rollovers through the shipped compaction transaction with a hand-built Cordis Context, and asserts the fresh window really is the note plus the current turn — including one long turn that has to roll over at its last step because it outlived everything before it.
@@ -234,7 +237,7 @@ node scripts/sync-preset.mjs
 - If the model never writes a note, the window holds out until a provider-confirmed overflow forces it. That is deliberate — an unprepared rollover loses state — but it means a model that ignores every notice reaches the hard failure instead of a quiet one.
 - The note's handoff is read from the whole session, so a note written in the turn that triggers a rollover is still carried.
 - A single indivisible message larger than the window cannot be repaired by a rollover; the optional tool-result pruner still runs before selection.
-- The override is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version. Verified at the targeted release: the restated list has the same 19 top-level plugin ids as the installation.
+- The override is a snapshot of `standard` at the targeted DSH release. A DSH upgrade can change that preset without this package noticing; run `sync-preset` and publish a new version. Verified at DSH 0.2.2-rc.1: the restated list has the same 22 top-level plugin ids as the installation, and every plugin name resolves there — `@deepseek-ai/dsh-tool-subagent-control/list-agents` from the 0.2.1 line was folded into its parent package in 0.2.2, and a snapshot left on that name fails every new session.
 - The override applies to sessions **started after** the bundle is enabled. A session already running keeps the preset it mounted at start, so restart (or open a new session) to pick up the new backend; the tools it already has do not change either way.
 - Push notices are appended as ordinary `user/message` events with the `sticky-window-notice` source kind. The session format admits extension source kinds, so a log stays readable after the plugin is removed, but an older reader will not know that kind by name.
 - On a DSH release whose base backend compacts on a **model switch** through a path that bypasses `compactIfNeeded`, that switch can still roll over without the note gate. The targeted 0.2.0 line has no such path; a later line would need this backend to gate it too.
