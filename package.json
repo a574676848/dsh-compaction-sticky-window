@@ -36,6 +36,24 @@
     "sticky-note"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a574676848/dsh-compaction-sticky-window.git"
+  },
+  "homepage": "https://github.com/a574676848/dsh-compaction-sticky-window#readme",
+  "bugs": {
+    "url": "https://github.com/a574676848/dsh-compaction-sticky-window/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-compaction": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-compaction-basic": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/schemastery": "~3.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
