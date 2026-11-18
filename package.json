@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-sticky-window",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Replaces the summarizing context compactor with a handoff note the model writes itself and a fresh window that keeps only the system prompt, the note, and the current turn.",
   "type": "module",
   "main": "index.js",
@@ -45,11 +45,18 @@
     "url": "https://github.com/a574676848/dsh-compaction-sticky-window/issues"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-compaction": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-compaction-basic": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/schemastery": "~3.19.0"
+    "@deepseek-ai/dsh-compaction": ">=0.0.1-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-compaction-basic": ">=0.0.1-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.19.0 <4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-compaction": { "optional": true },
+    "@deepseek-ai/dsh-compaction-basic": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
   },
   "publishConfig": {
     "access": "public",
