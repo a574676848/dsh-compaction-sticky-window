@@ -126,7 +126,8 @@ sequenceDiagram
 
 | 阶段 | 触发点 | 发生什么 |
 |---|---|---|
-| warning | `threshold − warnTokens` | 推送提醒，请模型趁还有空间时写便签。 |
+| midway | `threshold × midwayRatio` | 此时没有任何东西告急。提醒点名三类值得固化的事实——决策及理由、长官给出的约束、被否决的方案——只要那一次便宜的调用，绝不要求换窗。 |
+| warning | `threshold − max(warnTokens, threshold × warnRatio)` | 提醒同时报剩余 token 与**按本会话节奏还能走几步**，并给出两条路：工作单元装得下就继续，装不下就先收尾当前 step、写便签、再 `new_context`。 |
 | exhausted | `threshold` | 第二次提醒：本窗口预算已用完，下一步是 `sticky_note` 然后 `new_context`。**只有便签已保存时**才在这里换窗。 |
 | blocked | `ceiling = min(threshold + fallbackTokens, capacity)` | 没有便签时窗口依然不结束；提醒改为说明写便签才是唯一要紧的动作。 |
 
@@ -151,7 +152,7 @@ sequenceDiagram
 
 | 工具 | 回答什么 |
 |---|---|
-| `context_status` | 已用 token、换窗线、剩余 token、当前窗口序号，以及这个数字来自 Provider 实测还是本地估算。 |
+| `context_status` | 已用 token、换窗线、剩余 token、**这些剩余按本会话自身节奏还能走几步**、当前窗口序号，以及这个数字来自 Provider 实测还是本地估算。 |
 | `sticky_note` | `read` 返回新窗口将继承的交接；`update` 整份替换。 |
 | `new_context` | 立刻结束本窗口。本窗口没有已保存的便签时被拒绝。 |
 | `history_query` | `windows` 列出归档窗口，`search` 按大小写敏感字面量检索并返回条目 id，`read` 按 id 读取一条。 |
@@ -193,7 +194,9 @@ bundle 注册了一个 `systemPrompt` 段（order 9000），说明窗口是什�
 | `commandListMax` | `12` | 事实段里不同命令的上限。 |
 | `pinnedLineMaxChars` | `400` | 单条钉住内容的字符上限。 |
 | `warningTokens` | `6144` | 剩余预算低于此值时，`context_status` 建议立刻写便签。 |
-| `warnTokens` | `6144` | 距换窗线多少 token 时推送第一条提醒。 |
+| `warnTokens` | `6144` | 预警距离的绝对下限；下面的比例更小时以它为准。 |
+| `warnRatio` | `0.05` | 预警距离占换窗线的比例，与 `warnTokens` 取较大者。固定 token 距离在大窗口上会晚到"已经来不及收尾"。 |
+| `midwayRatio` | `0.7` | 换窗线的哪个比例处、在没有压力的情况下邀请写便签，趁有空间时固化决策。 |
 | `fallbackTokens` | `16384` | 越过换窗线后为等待便签而保留的余量。 |
 | `minEvictTokens` | `1024` | 值得替换的最小空间；低于它则拒绝换窗，因为便签的固定框架会比被替换的内容还大。 |
 | `budgetRecheckMs` | `60000` | 失败或否定性的预算解析在被重新询问前可信任的时长。 |

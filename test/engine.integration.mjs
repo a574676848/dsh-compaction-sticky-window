@@ -16,6 +16,7 @@ import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { StickyWindowCompactionEngine } from '../index.js'
 import { PINS_CLOSE, PINS_OPEN } from '../src/note.js'
 import { selectRolloverRange } from '../src/window.js'
+import { stepsRemaining, tokensPerStep } from '../src/pacing.js'
 
 /**
  * Price one message the way the transaction's estimator does.
@@ -669,6 +670,146 @@ test('one long turn rolls over at its last step instead of refusing', () => {
   const nodes = [...session.surface.nodes]
   const firstKept = nodes[nodes.indexOf(range.end) + 1]
   assert.equal(session.eventAt(firstKept).type, 'user/message', 'the kept tail starts a step')
+})
+
+/**
+ * Build a meter that reports a fixed usage, so budget bands land exactly where
+ * a test puts them regardless of what the session happens to contain.
+ * @param {number} totalTokens - usage every measurement reports.
+ * @returns {object} a token-meter double.
+ */
+function fixedMeter(totalTokens) {
+  return {
+    measure(session) {
+      const nodes = session.surface.nodes.map(seq => ({ seq, tokens: 1, heuristicTokens: 1 }))
+      return {
+        logRevision: session.seq,
+        baseline: { kind: 'none', tokens: 0 },
+        surfaceDeltaTokens: totalTokens,
+        totalTokens,
+        surfaceTokens: totalTokens,
+        nodes,
+      }
+    },
+    estimateMessage: () => 1,
+  }
+}
+
+/**
+ * Build a live engine whose rollover line is exactly 80000 tokens.
+ * @param {number} usedTokens - usage the meter reports.
+ * @returns {{ ctx: Context, session: Session }} the harness.
+ */
+function harnessAtUsage(usedTokens) {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', fixedMeter(usedTokens))
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow: 100_000 }, defaultMaxTokens: 0 }),
+  })
+  const session = buildSession(6)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+  // The absolute floor is set below the ratio on purpose: only the 5% band can
+  // reach 3000 tokens below an 80000-token line.
+  new StickyWindowCompactionEngine(ctx, { auto: false, headroomTokens: 0, maxTokens: 1, warnTokens: 1 })
+  return { ctx, session }
+}
+
+/**
+ * Read the text of the notices one pre-step injected.
+ * @param {object} decision - the waterfall result.
+ * @returns {string} joined notice text.
+ */
+function noticeText(decision) {
+  return decision.messages
+    .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text))
+    .join('\n')
+}
+
+test('the warning band scales with the rollover line, not a flat token count', async () => {
+  // 3000 above the line: outside a 6144-token band is false, outside a
+  // 5%-of-80000 = 4000-token band is also false, so this only warns when the
+  // ratio is what decides.
+  const { ctx, session } = harnessAtUsage(77_000)
+  const payload = {
+    agent: { session, options: {} },
+    messages: [],
+    turn: 1,
+    step: 2,
+    signal: new AbortController().signal,
+    modelSelection: { provider: 'mock', model: 'mock' },
+  }
+  const decision = await ctx.waterfall('agent/pre-step', payload, () => Promise.resolve({ kind: 'enter', messages: [] }))
+  assert.equal(decision.messages.length, 1)
+  assert.match(noticeText(decision), /tokens remain before this window ends/u)
+})
+
+test('well below the line the note is offered without pressure, once', async () => {
+  // 20000 above the line: past the 70% midpoint, short of the warning band.
+  const { ctx, session } = harnessAtUsage(60_000)
+  const payload = {
+    agent: { session, options: {} },
+    messages: [],
+    turn: 1,
+    step: 2,
+    signal: new AbortController().signal,
+    modelSelection: { provider: 'mock', model: 'mock' },
+  }
+  const fallback = () => Promise.resolve({ kind: 'enter', messages: [] })
+
+  const first = await ctx.waterfall('agent/pre-step', payload, fallback)
+  assert.equal(first.messages.length, 1, 'one notice is injected')
+  const text = noticeText(first)
+  assert.match(text, /cheapest moment to record/u)
+  assert.doesNotMatch(text, /new_context/u, 'recording a fact is not a reason to roll over')
+
+  const second = await ctx.waterfall('agent/pre-step', payload, fallback)
+  assert.equal(second.messages.length, 0, 'the midpoint stage is not repeated')
+})
+
+test('context_status reports what the remainder buys in steps', async () => {
+  const ctx = new Context()
+  /** @type {object[]} */
+  const registered = []
+  ctx.provide('tokenMeter', createMeter())
+  ctx.provide('tools', { register: tool => { registered.push(tool); return () => {} } })
+  ctx.provide('llm', {
+    resolveModelInfo: () => Promise.resolve({ context: { contextWindow: 100_000 }, defaultMaxTokens: 8000 }),
+  })
+  new StickyWindowCompactionEngine(ctx, { auto: false, headroomTokens: 0, maxTokens: 1 })
+  const session = buildSession(6)
+  session.append('request/header', {
+    reason: 'initial',
+    header: { config: { provider: 'mock', model: 'mock' } },
+  })
+
+  const status = registered.find(tool => tool.name === 'context_status')
+  const value = await status.execute({}, { agent: { session } })
+
+  assert.ok(value.tokensPerStep > 0, 'the pace comes from this session\'s own steps')
+  assert.equal(value.stepsRemaining, Math.floor(value.remainingTokens / value.tokensPerStep))
+  const rendered = status.output.render({}, value).map(block => block.text).join('\n')
+  assert.match(rendered, /tokens per step/u)
+})
+
+test('the pace estimate is a median, so one huge step cannot skew it', () => {
+  const nodes = [
+    { seq: 0, tokens: 100 }, { seq: 1, tokens: 100 },
+    { seq: 2, tokens: 100 }, { seq: 3, tokens: 100 },
+    { seq: 4, tokens: 9000 }, { seq: 5, tokens: 100 },
+    { seq: 6, tokens: 100 },
+  ]
+  const stepStarts = [0, 2, 4, 6]
+  // Steps 0-1, 2-3 and 4-5 cost 200, 200 and 9100; the median is 200.
+  assert.equal(tokensPerStep(nodes, stepStarts), 200)
+  assert.equal(tokensPerStep(nodes, [0]), undefined, 'one boundary is not a pace')
+  assert.equal(stepsRemaining(1000, 200), 5)
+  assert.equal(stepsRemaining(1000, undefined), undefined)
 })
 
 

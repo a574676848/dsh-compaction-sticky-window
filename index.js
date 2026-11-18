@@ -19,11 +19,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { resolveConfig, toLifecycleConfig } from './src/config.js'
 import { PIN_TOOL_NAME, buildStickyNote, extractPins, textOf } from './src/note.js'
 import { resolveRolloverBudget, rolloverCeiling } from './src/budget.js'
+import { stepsRemaining, tokensPerStep } from './src/pacing.js'
 import { selectRolloverRange } from './src/window.js'
 import {
   NOTICE_SOURCE_KIND,
   blockedNotice,
   exhaustedNotice,
+  midwayNotice,
   readyNotice,
   warningNotice,
 } from './src/notice.js'
@@ -89,6 +91,8 @@ const CONFIG_SCHEMA = z.object({
   pinnedLineMaxChars: COUNT(),
   warningTokens: COUNT(),
   warnTokens: COUNT(),
+  warnRatio: z.number(),
+  midwayRatio: z.number(),
   fallbackTokens: COUNT(),
   minEvictTokens: COUNT(),
   budgetRecheckMs: COUNT(),
@@ -356,9 +360,18 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
     const budget = await this.#budgetFor(session, new AbortController().signal)
     if (budget === undefined) return undefined
     const used = this.ctx.tokenMeter.measure(session).totalTokens
-    // Away from the line there is nothing to say, and the window state below
+    // The warning distance scales with the rollover line: a flat token count is
+    // milliseconds of work on a million-token window and a whole turn on a small
+    // one. The midpoint is the same distance below the line, and it is the last
+    // point at which pinning a decision still competes with nothing.
+    const warnDistance = Math.max(
+      this.policy.warnTokens,
+      Math.floor(budget.thresholdTokens * this.policy.warnRatio),
+    )
+    const midwayAt = Math.floor(budget.thresholdTokens * this.policy.midwayRatio)
+    // Away from every line there is nothing to say, and the window state below
     // costs a log scan. This runs on every step, so it exits cheap.
-    if (used < budget.thresholdTokens - this.policy.warnTokens) return undefined
+    if (used < midwayAt) return undefined
     const ceiling = rolloverCeiling(budget, this.policy.fallbackTokens, budget.contextWindow, budget.reserved)
     const { window, saved } = this.#windowState(session)
     const previous = this.#notices.get(session)
@@ -366,6 +379,14 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       ? previous
       : { window, sent: new Set() }
     this.#notices.set(session, state)
+    /**
+     * Estimate the pace lazily: only a notice that quotes steps pays for the scan.
+     * @returns {number | undefined} median tokens per step in this session.
+     */
+    const pace = () => tokensPerStep(
+      this.ctx.tokenMeter.measure(session).nodes,
+      session.snapshotEvents().filter(event => event.type === 'step/start').map(event => event.seq),
+    )
     /**
      * Offer one stage at most once per window.
      * @param {string} stage - stage key.
@@ -383,10 +404,13 @@ export class StickyWindowCompactionEngine extends BasicCompactionEngine {
       // for it again: `compactIfNeeded` ends this window in the same step.
       return saved ? once('ready', readyNotice) : once('exhausted', () => exhaustedNotice(ceiling - used))
     }
-    if (budget.thresholdTokens - used <= this.policy.warnTokens) {
-      return once('warn', () => warningNotice(budget.thresholdTokens - used))
+    if (used >= budget.thresholdTokens - warnDistance) {
+      return once('warn', () => {
+        const remaining = budget.thresholdTokens - used
+        return warningNotice(remaining, stepsRemaining(remaining, pace()))
+      })
     }
-    return undefined
+    return once('midway', midwayNotice)
   }
 
   /**

@@ -44,6 +44,24 @@ const DEFAULT_PINNED_LINE_MAX_CHARS = 400
 const DEFAULT_WARNING_TOKENS = 6144
 /** Default distance before the rollover line at which the session pushes a warning. */
 const DEFAULT_WARN_TOKENS = 6144
+/**
+ * Default warning distance as a fraction of the rollover line.
+ *
+ * A fixed token distance is the wrong shape once context windows span an order
+ * of magnitude: 6144 tokens is 8% of a 76k line and 0.8% of a million-token
+ * one, so a large window gets its first warning after the remaining budget can
+ * no longer pay for wrapping up. The larger of this fraction and the absolute
+ * distance is used, so small windows keep their explicit floor.
+ */
+const DEFAULT_WARN_RATIO = 0.05
+/**
+ * Fraction of the rollover line at which the note is offered without pressure.
+ *
+ * This is the memory-preservation prompt, not a budget warning: it exists so a
+ * decision, constraint, or rejected approach gets pinned while the window still
+ * has room, instead of competing with an emergency at the end.
+ */
+const DEFAULT_MIDWAY_RATIO = 0.7
 /** Default distance past the rollover line during which a rollover is postponed. */
 const DEFAULT_FALLBACK_TOKENS = 16384
 /**
@@ -99,6 +117,8 @@ export const EXTRA_KEYS = [
   'historyReadMaxChars',
   'historySearchLimit',
   'historySnippetChars',
+  'warnRatio',
+  'midwayRatio',
 ]
 
 /** Resolved plugin policy; frozen so a later mutation cannot change behavior mid-session. */
@@ -159,6 +179,8 @@ export function resolveConfig(config) {
     pinnedLineMaxChars: positiveInteger('pinnedLineMaxChars', config.pinnedLineMaxChars, DEFAULT_PINNED_LINE_MAX_CHARS),
     warningTokens: positiveInteger('warningTokens', config.warningTokens, DEFAULT_WARNING_TOKENS),
     warnTokens: positiveInteger('warnTokens', config.warnTokens, DEFAULT_WARN_TOKENS),
+    warnRatio: ratioValue('warnRatio', config.warnRatio, DEFAULT_WARN_RATIO),
+    midwayRatio: ratioValue('midwayRatio', config.midwayRatio, DEFAULT_MIDWAY_RATIO),
     fallbackTokens: positiveInteger('fallbackTokens', config.fallbackTokens, DEFAULT_FALLBACK_TOKENS),
     minEvictTokens: positiveInteger('minEvictTokens', config.minEvictTokens, DEFAULT_MIN_EVICT_TOKENS),
     budgetRecheckMs: positiveInteger('budgetRecheckMs', config.budgetRecheckMs, DEFAULT_BUDGET_RECHECK_MS),
@@ -187,6 +209,22 @@ function positiveInteger(name, value, fallback) {
   if (value === undefined) return fallback
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(`dsh-compaction-sticky-window: ${name} must be a positive integer`)
+  }
+  return value
+}
+
+/**
+ * Read one optional ratio in (0, 1], defaulting when absent.
+ * @param {string} name - config key, used in the diagnostic.
+ * @param {unknown} value - configured value or undefined.
+ * @param {number} fallback - default used when absent.
+ * @returns {number} the validated ratio.
+ * @throws {Error} when present and not a number in (0, 1].
+ */
+function ratioValue(name, value, fallback) {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`dsh-compaction-sticky-window: ${name} must be a number greater than 0 and at most 1`)
   }
   return value
 }

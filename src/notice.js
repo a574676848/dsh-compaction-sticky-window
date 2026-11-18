@@ -23,17 +23,27 @@ export const NOTICE_SOURCE_KIND = 'sticky-window-notice'
 
 /**
  * The notice shown while there is still room before the rollover line.
+ *
+ * It reports the remainder in steps as well as tokens, because the decision it
+ * asks for — does the work unit in flight fit — cannot be answered from tokens
+ * alone. Both the "keep going" and the "roll over now" branches are stated so
+ * the model chooses rather than always wrapping up.
  * @param {number} remainingTokens - tokens left before the rollover line.
+ * @param {number | undefined} remainingSteps - whole steps that budget still covers.
  * @returns {{ text: string, summary: string }} the notice.
  */
-export function warningNotice(remainingTokens) {
+export function warningNotice(remainingTokens, remainingSteps) {
+  const scale = remainingSteps === undefined
+    ? ''
+    : `, roughly ${remainingSteps} more ${remainingSteps === 1 ? 'step' : 'steps'} at the pace this `
+      + 'session has been running'
   return {
     summary: `${remainingTokens} tokens left`,
-    text: `About ${remainingTokens} tokens remain before this window ends. `
-      + 'Update the handoff note now with `sticky_note` action `update`: the goal and what finishing '
-      + 'means, decisions and their reasons, constraints, rejected approaches, open questions, and the '
-      + 'exact next action. Write it while there is room — once the window ends, anything not in the note '
-      + 'leaves the conversation.',
+    text: `About ${remainingTokens} tokens remain before this window ends${scale}. Decide with that `
+      + 'number. If the work unit you are in fits, keep going and ignore this. If it does not, finish '
+      + 'the step you are on, update the handoff note with `sticky_note` action `update`, and call '
+      + '`new_context`. Do not roll over mid-operation: the tool result you are waiting on has to '
+      + 'attach to a call that is still in the window.',
   }
 }
 
@@ -52,6 +62,27 @@ export function exhaustedNotice(remainingTokens) {
 }
 
 /**
+ * The notice shown while the window still has comfortable room.
+ *
+ * Nothing is running out here, which is exactly why it is offered: a decision,
+ * a stated constraint, or a rejected approach is cheapest to pin the moment it
+ * exists, and most expensive to reconstruct after an eviction that was not
+ * about it. It names the three facts worth pinning instead of asking for a note
+ * in general, and it asks for the cheap call only — never for a rollover.
+ * @returns {{ text: string, summary: string }} the notice.
+ */
+export function midwayNotice() {
+  return {
+    summary: 'room to record decisions',
+    text: 'You still have room, but this is the cheapest moment to record what you already know. If a '
+      + 'decision and the reason behind it, a constraint the person stated, or an approach you ruled '
+      + 'out currently lives only in this conversation, pin it now with `sticky_note` action `update`. '
+      + 'That is one cheap call and it survives the rollover; left here, it does not. Keep working '
+      + 'afterwards — this is not a reason to end the window.',
+  }
+}
+
+/**
  * The notice shown when the note is already saved and the window has not ended.
  *
  * Asking for a note that is already written is the one instruction a model must
@@ -63,8 +94,9 @@ export function exhaustedNotice(remainingTokens) {
 export function readyNotice() {
   return {
     summary: 'handoff note saved',
-    text: 'The handoff note is saved, so this window ends at the next boundary on its own. Keep working; '
-      + 'call `sticky_note` again only when something new has to survive the rollover.',
+    text: 'The handoff note is saved, so this window ends at the next boundary on its own. Keep working, '
+      + 'and update the note whenever something new has to survive — one cheap call. Do not resubmit '
+      + 'the same note just to force the rollover; that is the expensive operation, not this one.',
   }
 }
 

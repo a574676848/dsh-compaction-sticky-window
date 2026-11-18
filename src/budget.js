@@ -10,6 +10,8 @@
  * @module dsh-compaction-sticky-window/budget
  */
 
+import { stepsRemaining } from './pacing.js'
+
 /** Request-pressure fraction used when the config leaves it unset, mirroring the backend. */
 const DEFAULT_THRESHOLD_RATIO = 0.8
 /** Retained-window fraction used when the config leaves it unset, mirroring the backend. */
@@ -104,6 +106,10 @@ export function rolloverCeiling(budget, fallbackTokens, contextWindow, reservedC
 
 /**
  * Describe how much room the session has left before its next rollover.
+ *
+ * Token counts are reported alongside the step count they buy, because the
+ * decision the answer feeds — whether the work in flight still fits — is made
+ * in steps, not tokens.
  * @param {object} options - measured facts.
  * @param {number} options.usedTokens - current request pressure from the token meter.
  * @param {boolean} options.providerMeasured - whether the meter anchored on provider usage rather than an estimate.
@@ -112,10 +118,12 @@ export function rolloverCeiling(budget, fallbackTokens, contextWindow, reservedC
  * @param {number} options.rolloverAtTokens - resolved rollover threshold.
  * @param {number} options.windowNumber - ordinal of the current window.
  * @param {number} options.warningTokens - remaining budget at which the note should be written.
+ * @param {number} [options.tokensPerStep] - median tokens one step costs in this session.
  * @returns {object} the model-facing status.
  */
 export function describeStatus(options) {
   const remainingTokens = options.rolloverAtTokens - options.usedTokens
+  const steps = stepsRemaining(remainingTokens, options.tokensPerStep)
   return {
     window: options.windowNumber,
     usedTokens: options.usedTokens,
@@ -123,8 +131,10 @@ export function describeStatus(options) {
     rolloverAtTokens: options.rolloverAtTokens,
     contextWindow: options.contextWindow,
     reservedCompletionTokens: options.reservedCompletionTokens,
+    tokensPerStep: options.tokensPerStep,
+    stepsRemaining: steps,
     source: options.providerMeasured ? 'provider-usage' : 'local-estimate',
-    advice: adviceFor(remainingTokens, options.warningTokens),
+    advice: adviceFor(remainingTokens, options.warningTokens, steps),
   }
 }
 
@@ -132,16 +142,23 @@ export function describeStatus(options) {
  * Tell the caller what to do with the remaining budget.
  * @param {number} remainingTokens - tokens left before the next rollover.
  * @param {number} warningTokens - the configured warning distance.
- * @returns {string} one actionable sentence.
+ * @param {number | undefined} steps - completed steps that budget still covers.
+ * @returns {string} one actionable paragraph.
  */
-function adviceFor(remainingTokens, warningTokens) {
+function adviceFor(remainingTokens, warningTokens, steps) {
+  const scale = steps === undefined
+    ? ''
+    : ` — about ${steps} more ${steps === 1 ? 'step' : 'steps'} at this session's pace`
   if (remainingTokens <= 0) {
-    return 'The next step rolls over to a new window. Call sticky_note now with the state a fresh '
-      + 'reader needs; the note and the retained messages are all that survives.'
+    return `No room left before the rollover line${scale}. Update the handoff note now with everything a `
+      + 'fresh window needs, and wrap up the step you are on instead of starting new work. If the note '
+      + 'is saved, call `new_context` to end the window deliberately.'
   }
   if (remainingTokens <= warningTokens) {
-    return 'A rollover is close. Call sticky_note with decisions, constraints, and open problems that '
-      + 'this conversation alone records; otherwise they are lost at the next eviction.'
+    return `A rollover is close${scale}. If the work unit you are in fits in that, keep going. If it `
+      + 'does not, finish the current step, update the note, and call `new_context` — anything not '
+      + 'written into the note does not survive the window.'
   }
-  return 'There is room to continue. Pin durable facts as they are decided rather than at the end.'
+  return `There is room to continue${scale}. Pin durable facts as they are decided rather than at the `
+    + 'end, so a rollover never decides what this conversation gets to remember.'
 }

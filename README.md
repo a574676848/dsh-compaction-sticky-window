@@ -125,11 +125,12 @@ sequenceDiagram
     Note over X: only a provider-confirmed overflow<br/>forces a window that has no note
 ```
 
-Automatic pressure is a three-stage ramp, not a cliff:
+Automatic pressure is a four-stage ramp, not a cliff:
 
 | Stage | At | What happens |
 |---|---|---|
-| warning | `threshold − warnTokens` | A notice asks for the note while there is still room to write it. |
+| midway | `threshold × midwayRatio` | Nothing is running out. The notice names the three facts worth pinning — a decision and its reason, a constraint the person stated, a rejected approach — and asks for the cheap call only, never a rollover. |
+| warning | `threshold − max(warnTokens, threshold × warnRatio)` | A notice reports the remainder in steps as well as tokens and offers both branches: keep going if the work unit fits, else finish the step, write the note, and `new_context`. |
 | exhausted | `threshold` | A second notice says the window's budget is spent and the next action is `sticky_note` then `new_context`. A rollover happens here **only if a note is saved**. |
 | blocked | `ceiling = min(threshold + fallbackTokens, capacity)` | With no saved note the window still does not end; the notice now says writing the note is the only action that matters. |
 
@@ -154,7 +155,7 @@ Pins are only read from a `sticky_note` result, so a file the agent read cannot 
 
 | Tool | Answers |
 |---|---|
-| `context_status` | Tokens used, the rollover line, tokens remaining, the current window ordinal, and whether the figure is provider usage or a local estimate. |
+| `context_status` | Tokens used, the rollover line, tokens remaining, what that remainder buys in steps at this session's own pace, the current window ordinal, and whether the figure is provider usage or a local estimate. |
 | `sticky_note` | `read` returns the handoff a fresh window inherits; `update` replaces it. |
 | `new_context` | Ends the window now. Refused while this window has no saved note. |
 | `history_query` | `windows` lists archived windows, `search` finds a case-sensitive literal and returns item ids, `read` returns one item by id. |
@@ -196,7 +197,9 @@ Every key is optional. Unknown keys fail at load instead of being ignored.
 | `commandListMax` | `12` | Distinct commands in the appendix. |
 | `pinnedLineMaxChars` | `400` | Per-line character cap for a pinned fact. |
 | `warningTokens` | `6144` | Remaining budget at which `context_status` advises writing the note now. |
-| `warnTokens` | `6144` | Distance before the rollover line at which the session pushes its first notice. |
+| `warnTokens` | `6144` | Absolute floor for the warning distance, used when the ratio below is smaller. |
+| `warnRatio` | `0.05` | Warning distance as a fraction of the rollover line; the larger of this and `warnTokens` wins. A flat distance warns too late on a large context window to still wrap up. |
+| `midwayRatio` | `0.7` | Fraction of the rollover line at which the note is offered without pressure, to record decisions while there is room. |
 | `fallbackTokens` | `16384` | Slack past the line during which a rollover waits for the note. |
 | `minEvictTokens` | `1024` | Smallest span worth replacing; below it a rollover is refused, because the note's fixed framing would be larger than what it replaces. |
 | `budgetRecheckMs` | `60000` | How long a failed or negative budget resolution is trusted before the model's capacity is asked again. |

@@ -17,6 +17,7 @@ import {
   searchArchive,
 } from './history.js'
 import { describeStatus, resolveRolloverBudget } from './budget.js'
+import { tokensPerStep } from './pacing.js'
 import { noteSavedThisWindow, selectRolloverRange } from './window.js'
 
 /** Model-facing contract of the pin tool. */
@@ -32,9 +33,9 @@ const PIN_TOOL_DESCRIPTION =
 /** Model-facing contract of the sensing tool. */
 const SENSING_TOOL_DESCRIPTION =
   'Report how much of this window is left before it ends. Returns the tokens used, the rollover line, '
-  + 'the tokens remaining, the current window ordinal, and whether the number comes from provider usage '
-  + 'or a local estimate. Call it before a large step, and to decide whether the note is current enough '
-  + 'to roll over.'
+  + 'the tokens remaining, how many steps that remainder buys at this session\'s own pace, the current '
+  + 'window ordinal, and whether the number comes from provider usage or a local estimate. Call it '
+  + 'before a large step, and to decide whether the work in flight still fits in this window.'
 
 /** Model-facing contract of the recall tool. */
 const HISTORY_TOOL_DESCRIPTION =
@@ -127,6 +128,8 @@ export function createSensingTool(engine) {
           rolloverAtTokens: { type: 'integer' },
           contextWindow: { type: 'integer' },
           reservedCompletionTokens: { type: 'integer' },
+          tokensPerStep: { type: 'integer' },
+          stepsRemaining: { type: 'integer' },
           source: { type: 'string' },
           advice: { type: 'string' },
         },
@@ -179,6 +182,12 @@ export function createSensingTool(engine) {
         rolloverAtTokens: budget.thresholdTokens,
         windowNumber: currentWindowNumber(session),
         warningTokens: engine.policy.warningTokens,
+        tokensPerStep: tokensPerStep(
+          measurement.nodes,
+          session.snapshotEvents()
+            .filter(event => event.type === 'step/start')
+            .map(event => event.seq),
+        ),
       })
       return { available: true, ...status }
     },
@@ -193,10 +202,15 @@ export function createSensingTool(engine) {
  */
 function renderStatus(value) {
   if (value.available !== true) return `Context status unavailable: ${value.reason ?? 'unknown reason'}`
+  const pace = value.stepsRemaining === undefined
+    ? 'Pace: not measurable yet — this session has fewer than two completed steps.'
+    : `At the current pace of ${value.tokensPerStep} tokens per step, that remainder buys about `
+      + `${value.stepsRemaining} more ${value.stepsRemaining === 1 ? 'step' : 'steps'}.`
   return [
     `Window ${value.window}: ${value.usedTokens} of ${value.rolloverAtTokens} tokens used `
       + `(${value.contextWindow} context, ${value.reservedCompletionTokens} reserved for the reply).`,
     `Remaining before rollover: ${value.remainingTokens} tokens (source: ${value.source}).`,
+    pace,
     value.advice,
   ].join('\n')
 }
